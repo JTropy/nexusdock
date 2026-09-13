@@ -11,12 +11,54 @@ permissions:
   packages: write
 
 jobs:
+  # 发布门禁：发布镜像必须先通过与 ci.yml 相同的完整验证（make ci + 生成物一致性）。
+  # ci.yml 是单 job 工作流，这里直接内联同样步骤是最简单的复用方式；
+  # 省略 ci.yml 末尾的 docker build 步骤——publish job 本身就会构建多架构镜像。
+  # 触发 tag 推送时 CI 与本门禁会各跑一次完整验证，属于可接受的重复。
+  ci:
+    name: Full CI gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GOPROXY: https://proxy.golang.org,direct
+      GOSUMDB: sum.golang.org
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Validate, test and build
+        run: make ci
+
+      - name: Verify generated files are committed
+        run: git diff --exit-code
+
   publish:
     name: Publish container images
+    needs: ci
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          # git describe 需要完整历史与标签，才能得到与 Makefile 构建一致的版本号。
+          fetch-depth: 0
+
+      - name: Resolve build version
+        id: buildmeta
+        shell: bash
+        run: |
+          version="$(git describe --tags --always --dirty)"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-qemu-action@v3
 
@@ -59,6 +101,12 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # 与 Makefile 构建同源：二进制 buildinfo 与 OCI revision 标签都指向本次推送的提交，
+          # 保证"镜像标签 sha-<短SHA> = 镜像内 revision = 目标提交"三者在发布时即一致。
+          build-args: |
+            NEXUS_VERSION=${{ steps.buildmeta.outputs.version }}
+            NEXUS_REVISION=${{ github.sha }}
+            NEXUS_SOURCE=https://github.com/${{ github.repository }}
           cache-from: type=gha,scope=nexusdock-runtime
           cache-to: type=gha,mode=max,scope=nexusdock-runtime,ignore-error=true
 
@@ -95,6 +143,27 @@ jobs:
           else
             echo "value=latest" >> "$GITHUB_OUTPUT"
           fi
+
+      # revision 一致性兜底校验：构建上下文不含 .git（.dockerignore 排除，Go VCS 注入不生效），
+      # 二进制里出现目标提交 SHA 的唯一途径就是 build args 的 ldflags 注入；
+      # 若注入失效，镜像内的 revision 会退回 unknown，这里直接失败。
+      - name: Verify image revision matches build commit
+        shell: bash
+        env:
+          VERIFY_TAG: ${{ steps.tag.outputs.value }}
+        run: |
+          set -euo pipefail
+          images=(
+            "ghcr.io/${GITHUB_REPOSITORY}:${VERIFY_TAG}"
+            "agentdockio/nexusdock:${VERIFY_TAG}"
+          )
+          for image in "${images[@]}"; do
+            echo "Checking revision of ${image}"
+            docker pull "$image"
+            docker run --rm --entrypoint sh \
+              -e NEXUS_EXPECTED_REVISION="${GITHUB_SHA}" \
+              "$image" -c 'grep -q "$NEXUS_EXPECTED_REVISION" /usr/local/bin/nexusdock'
+          done
 
       - name: Pull and run published images
         shell: bash
