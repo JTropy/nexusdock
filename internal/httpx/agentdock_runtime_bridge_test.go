@@ -4,8 +4,8 @@ import (
 	"errors"
 	"net/http"
 	"reflect"
+	"strings"
 	"testing"
-	"time"
 
 	"github.com/uvwt/nexusdock/internal/agentdock"
 )
@@ -70,17 +70,31 @@ func TestRuntimeBridgeErrorKeepsTransportFailuresUnavailable(t *testing.T) {
 	}
 }
 
-func TestAgentDockRuntimeRequestTimeoutIsEightSeconds(t *testing.T) {
-	if agentDockRuntimeRequestTimeout != 8*time.Second {
-		t.Fatalf("runtime request timeout = %s", agentDockRuntimeRequestTimeout)
-	}
-}
-
 func TestRuntimeUnavailableRecognizesRuntimeError(t *testing.T) {
 	if !isRuntimeUnavailable(agentDockRuntimeError{Code: "AGENTDOCK_RUNTIME_UNREACHABLE"}) {
 		t.Fatal("agentDockRuntimeError should be recognized")
 	}
 	if isRuntimeUnavailable(errors.New("other")) {
 		t.Fatal("plain error should not be recognized")
+	}
+}
+
+func TestRuntimeBridgeErrorClassifiesContractErrors(t *testing.T) {
+	contractErr := &agentdock.ContractError{
+		Node: "node1", Operation: "GET /internal/runtime/tasks",
+		Field: "tasks[0].status", Reason: "非法枚举值 \"done\"",
+	}
+	converted := runtimeBridgeError(contractErr)
+	if converted.Code != "AGENTDOCK_RUNTIME_BAD_RESPONSE" {
+		t.Fatalf("code = %q", converted.Code)
+	}
+	if converted.Status != http.StatusBadGateway || runtimeErrorHTTPStatus(converted) != http.StatusBadGateway {
+		t.Fatalf("status = %d", converted.Status)
+	}
+	// 错误信息必须保留节点、上游方法与字段路径，便于定位契约漂移。
+	for _, fragment := range []string{"node1", "GET /internal/runtime/tasks", "tasks[0].status"} {
+		if !strings.Contains(converted.Message, fragment) {
+			t.Fatalf("message %q 缺少定位上下文 %q", converted.Message, fragment)
+		}
 	}
 }

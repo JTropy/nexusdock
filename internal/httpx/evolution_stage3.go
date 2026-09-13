@@ -2,6 +2,7 @@ package httpx
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -151,7 +152,11 @@ func (s *Server) runEvolutionStage3(ctx context.Context, client *stage3.Client) 
 			"evidence_refs": candidate.EvidenceRefs,
 			"rationale":     candidate.Rationale,
 		}
-		if _, err := s.runtimePost(ctx, nodeID, "/internal/runtime/evolve", payload); err != nil {
+		encoded, err := json.Marshal(payload)
+		if err == nil {
+			err = s.agentDockHub.RuntimeEvolve(ctx, nodeID, encoded)
+		}
+		if err != nil {
 			if s.logger != nil {
 				s.logger.Warn("Stage 3 proposal rejected by AgentDock", "node_id", nodeID, "candidate_type", candidate.Type, "error", err)
 			}
@@ -193,7 +198,7 @@ func (s *Server) stage3Snapshot(ctx context.Context) (stage3.Snapshot, []agentdo
 	}
 
 	for _, node := range enabled {
-		tasks, taskErr := s.collectOpsTasksFromRuntime(ctx, node.ID, stage3TaskListPerNode)
+		tasks, taskErr := s.agentDockHub.RuntimeTasks(ctx, node.ID, stage3TaskListPerNode)
 		if taskErr != nil {
 			if s.logger != nil {
 				s.logger.Debug("Stage 3 skipped unavailable AgentDock node", "node_id", node.ID, "error", taskErr)
@@ -209,19 +214,19 @@ func (s *Server) stage3Snapshot(ctx context.Context) (stage3.Snapshot, []agentdo
 			if summary.ReviewStatus != "pass" && summary.ReviewStatus != "failed" {
 				continue
 			}
-			detail, detailErr := s.runtimeTaskDetailFromRuntime(ctx, node.ID, summary.ID)
+			detail, detailErr := s.agentDockHub.RuntimeTask(ctx, node.ID, summary.ID)
 			if detailErr != nil {
 				continue
 			}
-			reviewRevision := opsString(detail.FinalReview["review_revision"])
-			if reviewRevision == "" {
+			if detail.FinalReview == nil || detail.FinalReview.ReviewRevision == "" {
 				continue
 			}
+			finalReview := detail.FinalReview
 			snapshot.Tasks = append(snapshot.Tasks, stage3.TaskFact{
 				NodeID: node.ID, TaskID: summary.ID, Title: summary.Title, Goal: summary.Goal, Summary: summary.Summary,
-				Status: summary.Status, ReviewStatus: summary.ReviewStatus, ReviewRevision: reviewRevision,
-				VerifiedFacts: opsStringArray(detail.FinalReview["verified_facts"]), OpenRisks: opsStringArray(detail.FinalReview["open_risks"]),
-				MissingChecks: opsStringArray(detail.FinalReview["missing_checks"]), UpdatedAt: summary.UpdatedAt,
+				Status: summary.Status, ReviewStatus: summary.ReviewStatus, ReviewRevision: finalReview.ReviewRevision,
+				VerifiedFacts: finalReview.VerifiedFacts, OpenRisks: finalReview.OpenRisks,
+				MissingChecks: finalReview.MissingChecks, UpdatedAt: summary.UpdatedAt,
 			})
 			count++
 		}
