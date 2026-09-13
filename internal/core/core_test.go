@@ -84,16 +84,18 @@ func TestEnsureSchemaIsIdempotentAndPersistent(t *testing.T) {
 			t.Fatalf("%s missing: %v", table, err)
 		}
 	}
+	// 版本化之后启动路径不再有任何 DROP TABLE：历史遗留表只在 v1 迁移里
+	// 一次性清理，之后再次出现同名表（例如外部工具建的）启动时不做任何清理。
 	if _, err := db.ExecContext(ctx, `CREATE TABLE tasks(id TEXT PRIMARY KEY)`); err != nil {
 		t.Fatal(err)
 	}
 	if err := EnsureSchema(ctx, db); err != nil {
 		t.Fatal(err)
 	}
-	var removedTable string
-	err = db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND name='tasks'`).Scan(&removedTable)
-	if !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("unused table should be removed, err=%v table=%q", err, removedTable)
+	var keptTable string
+	err = db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND name='tasks'`).Scan(&keptTable)
+	if err != nil {
+		t.Fatalf("versioned startup must not drop tables, err=%v", err)
 	}
 	if _, err := db.ExecContext(ctx, `INSERT INTO users(id, username, created_at, updated_at) VALUES('u1', 'alice', 'now', 'now')`); err != nil {
 		t.Fatal(err)
