@@ -333,25 +333,35 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 
 // ready 是 readiness 探针：控制库可执行查询且 Recall 根目录可访问才算就绪。
 // 检查保持轻量（SELECT 1 + Stat），完整完整性检查只在启动时执行一次，
-// 避免周期探针本身变成负载。失败必须返回 503 并带出具体原因，便于排障。
+// 避免周期探针本身变成负载。公开响应只返回稳定组件状态，底层数据库错误与
+// 宿主路径只写服务日志，避免故障时通过未认证探针泄露内部实现细节。
 func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 	checks := make(map[string]string, 2)
 	if s.db == nil {
-		checks["database"] = "control plane database is not configured"
+		checks["database"] = "unavailable"
 	} else {
 		var one int
 		if err := s.db.QueryRowContext(r.Context(), `SELECT 1`).Scan(&one); err != nil {
-			checks["database"] = err.Error()
+			checks["database"] = "unavailable"
+			if s.logger != nil {
+				s.logger.Warn("readiness check failed", "component", "database", "error", err)
+			}
 		}
 	}
 	if s.store == nil {
-		checks["recall"] = "recall store is not configured"
+		checks["recall"] = "unavailable"
 	} else {
 		info, err := os.Stat(s.store.Root())
 		if err != nil {
-			checks["recall"] = err.Error()
+			checks["recall"] = "unavailable"
+			if s.logger != nil {
+				s.logger.Warn("readiness check failed", "component", "recall", "error", err)
+			}
 		} else if !info.IsDir() {
-			checks["recall"] = "recall repository path is not a directory"
+			checks["recall"] = "unavailable"
+			if s.logger != nil {
+				s.logger.Warn("readiness check failed", "component", "recall", "error", "repository root is not a directory")
+			}
 		}
 	}
 	if len(checks) > 0 {

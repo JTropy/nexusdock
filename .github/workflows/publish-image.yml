@@ -47,6 +47,8 @@ jobs:
     needs: ci
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -89,7 +91,7 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
 
       - name: Build and push image
         id: push
@@ -118,6 +120,8 @@ jobs:
     needs: publish
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      PUBLISHED_DIGEST: ${{ needs.publish.outputs.digest }}
     steps:
       - uses: docker/setup-buildx-action@v3
 
@@ -134,32 +138,29 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Resolve verification tag
-        id: tag
-        shell: bash
-        run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-          else
-            echo "value=latest" >> "$GITHUB_OUTPUT"
-          fi
-
-      # revision 一致性兜底校验：构建上下文不含 .git（.dockerignore 排除，Go VCS 注入不生效），
-      # 二进制里出现目标提交 SHA 的唯一途径就是 build args 的 ldflags 注入；
-      # 若注入失效，镜像内的 revision 会退回 unknown，这里直接失败。
+      # 永远按本次 build-push 输出的不可变 manifest digest 验证，不能用 latest/semver alias：
+      # workflow_dispatch 可从任意分支触发，而 alias 可能指向另一提交。
       - name: Verify image revision matches build commit
         shell: bash
-        env:
-          VERIFY_TAG: ${{ steps.tag.outputs.value }}
         run: |
           set -euo pipefail
+          [[ "$PUBLISHED_DIGEST" == sha256:* ]] || {
+            echo "invalid published digest: ${PUBLISHED_DIGEST}" >&2
+            exit 1
+          }
           images=(
-            "ghcr.io/${GITHUB_REPOSITORY}:${VERIFY_TAG}"
-            "agentdockio/nexusdock:${VERIFY_TAG}"
+            "ghcr.io/${GITHUB_REPOSITORY}@${PUBLISHED_DIGEST}"
+            "agentdockio/nexusdock@${PUBLISHED_DIGEST}"
           )
           for image in "${images[@]}"; do
             echo "Checking revision of ${image}"
             docker pull "$image"
+            revision="$(docker image inspect -f '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image")"
+            if [[ "$revision" != "$GITHUB_SHA" ]]; then
+              echo "OCI revision mismatch: got ${revision}, want ${GITHUB_SHA}" >&2
+              exit 1
+            fi
+            # 构建上下文不含 .git，二进制出现完整 SHA 只能来自 build args 的 ldflags 注入。
             docker run --rm --entrypoint sh \
               -e NEXUS_EXPECTED_REVISION="${GITHUB_SHA}" \
               "$image" -c 'grep -q "$NEXUS_EXPECTED_REVISION" /usr/local/bin/nexusdock'
@@ -167,13 +168,11 @@ jobs:
 
       - name: Pull and run published images
         shell: bash
-        env:
-          VERIFY_TAG: ${{ steps.tag.outputs.value }}
         run: |
           set -euo pipefail
           images=(
-            "ghcr.io/${GITHUB_REPOSITORY}:${VERIFY_TAG}"
-            "agentdockio/nexusdock:${VERIFY_TAG}"
+            "ghcr.io/${GITHUB_REPOSITORY}@${PUBLISHED_DIGEST}"
+            "agentdockio/nexusdock@${PUBLISHED_DIGEST}"
           )
           for image in "${images[@]}"; do
             echo "Verifying ${image}"

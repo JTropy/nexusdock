@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/uvwt/nexusdock/internal/config"
@@ -63,8 +64,11 @@ func TestReadyReportsUnavailableDatabaseWith503(t *testing.T) {
 	if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if body.OK || body.Checks["database"] == "" {
+	if body.OK || body.Checks["database"] != "unavailable" {
 		t.Fatalf("ready body should report database failure: %#v", body)
+	}
+	if strings.Contains(res.Body.String(), "database is closed") {
+		t.Fatalf("ready response leaked database error: %s", res.Body.String())
 	}
 }
 
@@ -99,8 +103,11 @@ func TestReadyReportsInaccessibleRecallRootWith503(t *testing.T) {
 	if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if body.OK || body.Checks["recall"] == "" {
+	if body.OK || body.Checks["recall"] != "unavailable" {
 		t.Fatalf("ready body should report recall failure: %#v", body)
+	}
+	if strings.Contains(res.Body.String(), store.Root()) {
+		t.Fatalf("ready response leaked recall root: %s", res.Body.String())
 	}
 }
 
