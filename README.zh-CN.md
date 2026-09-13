@@ -207,10 +207,13 @@ curl http://127.0.0.1:18777/health
 | `RECALL_REPO_DIR` | `./recall` | 挂载到容器 `/recall` 的宿主机目录 |
 | `NEXUS_PUBLIC_URL` | 空 | 对外 HTTPS Origin，例如 `https://nexus.example.com` |
 | `NEXUS_TRUSTED_PROXIES` | `127.0.0.1,::1` | 允许提供可信 `X-Forwarded-*` 的代理地址 |
+| `NEXUS_HTTP_BIND` | `127.0.0.1` | 宿主机监听地址；容器内端口固定 `18777` |
+| `NEXUS_HTTP_PORT` | `18777` | 宿主机端口；容器内端口固定 `18777` |
+| `NEXUS_IMAGE` | 空 | 生产固定使用的镜像标签，例如 `ghcr.io/uvwt/nexusdock:sha-<短SHA>`；留空回退 `nexusdock:local` |
 
 这里的 `NEXUS_DATA_DIR` 与 `RECALL_REPO_DIR` 是宿主机 bind mount 来源；官方镜像内部固定使用 `/var/lib/nexus` 和 `/recall`。
 
-仓库 Compose 的示例值见 [`.env.example`](./.env.example)。
+仓库 Compose 的示例值见 [`.env.example`](./.env.example)；生产部署、备份、回滚与清理的完整 runbook 见 [docs/deploy.zh-CN.md](./docs/deploy.zh-CN.md)。
 
 ### 裸二进制与高级部署
 

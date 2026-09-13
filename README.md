@@ -207,10 +207,13 @@ The repository Compose file reads these values from `.env`:
 | `RECALL_REPO_DIR` | `./recall` | Host directory mounted to `/recall` |
 | `NEXUS_PUBLIC_URL` | empty | Public HTTPS origin, for example `https://nexus.example.com` |
 | `NEXUS_TRUSTED_PROXIES` | `127.0.0.1,::1` | Proxies allowed to supply trusted `X-Forwarded-*` headers |
+| `NEXUS_HTTP_BIND` | `127.0.0.1` | Host listen address; the container port is fixed at `18777` |
+| `NEXUS_HTTP_PORT` | `18777` | Host port; the container port is fixed at `18777` |
+| `NEXUS_IMAGE` | empty | Image tag pinned for production, for example `ghcr.io/uvwt/nexusdock:sha-<short SHA>`; falls back to `nexusdock:local` |
 
 `NEXUS_DATA_DIR` and `RECALL_REPO_DIR` above are host bind-mount sources. Inside the official image, NexusDock always uses `/var/lib/nexus` and `/recall`.
 
-See [`.env.example`](./.env.example) for the repository Compose values.
+See [`.env.example`](./.env.example) for the repository Compose values. The full production runbook for deployment, backup, rollback and retention is [docs/deploy.zh-CN.md](./docs/deploy.zh-CN.md) (Chinese).
 
 ### Direct binary and advanced deployment
 
