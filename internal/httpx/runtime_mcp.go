@@ -1,8 +1,8 @@
 package httpx
 
 import (
+	"encoding/json"
 	"net/http"
-	"net/url"
 	"strings"
 )
 
@@ -37,13 +37,14 @@ func (s *Server) registerRuntimeMCPRoutes(mux *http.ServeMux, protected func(htt
 
 func (s *Server) runtimeMCPServers(w http.ResponseWriter, r *http.Request) {
 	nodeID := r.PathValue("nodeID")
-	payload, err := s.runtimeGet(r.Context(), nodeID, "/internal/runtime/mcp", nil)
+	servers, err := s.agentDockHub.RuntimeMCPServers(r.Context(), nodeID)
 	if err != nil {
-		writeJSON(w, runtimeErrorHTTPStatus(err), runtimeUnavailablePayload(err))
+		writeRuntimeUnavailable(w, err)
 		return
 	}
-	payload["node_id"] = nodeID
-	writeJSON(w, http.StatusOK, payload)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "node_id": nodeID, "servers": servers, "count": len(servers), "source": "agentdock-runtime-api",
+	})
 }
 
 func (s *Server) runtimeMCPServer(w http.ResponseWriter, r *http.Request) {
@@ -53,13 +54,14 @@ func (s *Server) runtimeMCPServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	nodeID := r.PathValue("nodeID")
-	payload, err := s.runtimeGet(r.Context(), nodeID, "/internal/runtime/mcp/"+url.PathEscape(name), nil)
+	detail, err := s.agentDockHub.RuntimeMCPServer(r.Context(), nodeID, name)
 	if err != nil {
-		writeJSON(w, runtimeErrorHTTPStatus(err), runtimeUnavailablePayload(err))
+		writeRuntimeUnavailable(w, err)
 		return
 	}
-	payload["node_id"] = nodeID
-	writeJSON(w, http.StatusOK, payload)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "node_id": nodeID, "server": detail.Server, "config": detail.Config, "source": "agentdock-runtime-api",
+	})
 }
 
 func (s *Server) runtimeMCPEnvironment(w http.ResponseWriter, r *http.Request) {
@@ -69,16 +71,14 @@ func (s *Server) runtimeMCPEnvironment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	nodeID := r.PathValue("nodeID")
-	payload, err := s.runtimePost(r.Context(), nodeID, "/internal/runtime/mcp", runtimeMCPRequest{
-		Action: "env_list",
-		Name:   name,
-	})
+	items, err := s.agentDockHub.RuntimeMCPEnvironment(r.Context(), nodeID, name)
 	if err != nil {
-		writeJSON(w, runtimeErrorHTTPStatus(err), runtimeUnavailablePayload(err))
+		writeRuntimeUnavailable(w, err)
 		return
 	}
-	payload["node_id"] = nodeID
-	writeJSON(w, http.StatusOK, payload)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "node_id": nodeID, "items": items, "count": len(items), "source": "agentdock-runtime-api",
+	})
 }
 
 func (s *Server) runtimeMCPManage(w http.ResponseWriter, r *http.Request) {
@@ -97,13 +97,17 @@ func (s *Server) runtimeMCPManage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	nodeID := r.PathValue("nodeID")
-	payload, err := s.runtimePost(r.Context(), nodeID, "/internal/runtime/mcp", request)
+	body, err := json.Marshal(request)
 	if err != nil {
-		writeJSON(w, runtimeErrorHTTPStatus(err), runtimeUnavailablePayload(err))
+		writeError(w, http.StatusInternalServerError, "INVALID_MCP_ACTION", "编码 MCP 管理请求失败")
 		return
 	}
-	// AgentDock 正常不会回显 value；Nexus 仍主动移除，避免上游契约回归造成密钥泄露。
-	delete(payload, "value")
+	// 响应是随 action 变化的透传 map（密钥值已在 agentdock 层强制移除），Nexus 不解读其内容。
+	payload, err := s.agentDockHub.RuntimeMCPManage(r.Context(), nodeID, body)
+	if err != nil {
+		writeRuntimeUnavailable(w, err)
+		return
+	}
 	payload["node_id"] = nodeID
 	writeJSON(w, http.StatusOK, payload)
 }

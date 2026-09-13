@@ -1,21 +1,11 @@
 package httpx
 
 import (
-	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
-	"net/url"
-	"strconv"
-	"strings"
-	"time"
 
-	protocol "github.com/uvwt/agentdock-protocol"
 	"github.com/uvwt/nexusdock/internal/agentdock"
 )
-
-const agentDockRuntimeRequestTimeout = 8 * time.Second
 
 type agentDockRuntimeError struct {
 	Status       int            `json:"-"`
@@ -37,60 +27,48 @@ func (e agentDockRuntimeError) Error() string {
 	return "AgentDock Runtime API unavailable"
 }
 
-func (s *Server) runtimeGet(ctx context.Context, nodeID, path string, query url.Values) (map[string]any, error) {
-	return s.runtimeRequest(ctx, nodeID, http.MethodGet, path, query, nil)
-}
-
-func (s *Server) runtimeDelete(ctx context.Context, nodeID, path string) (map[string]any, error) {
-	return s.runtimeRequest(ctx, nodeID, http.MethodDelete, path, nil, nil)
-}
-
-func (s *Server) runtimePost(ctx context.Context, nodeID, path string, payload any) (map[string]any, error) {
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("encode AgentDock Runtime request: %w", err)
-	}
-	return s.runtimeRequest(ctx, nodeID, http.MethodPost, path, nil, body)
-}
-
-func (s *Server) runtimeRequest(ctx context.Context, nodeID, method, path string, query url.Values, requestBody []byte) (map[string]any, error) {
-	if s.agentDockHub == nil {
-		return nil, agentDockRuntimeError{Code: "AGENTDOCK_CONNECTION_UNAVAILABLE", Message: "AgentDock 节点连接服务不可用"}
-	}
-	// 与 AgentDock direct Runtime API 保持同样的 8 秒边界；调用方已有更短 deadline 时不会被延长。
-	requestCtx, cancel := context.WithTimeout(ctx, agentDockRuntimeRequestTimeout)
-	defer cancel()
-	if s.agentDock != nil {
-		if _, err := s.agentDock.Get(requestCtx, nodeID); err != nil {
-			if errors.Is(err, agentdock.ErrNodeNotFound) {
-				return nil, agentDockRuntimeError{Status: http.StatusNotFound, Code: "AGENTDOCK_NODE_NOT_FOUND", Message: err.Error()}
-			}
-			return nil, agentDockRuntimeError{Code: "AGENTDOCK_NODE_LOOKUP_FAILED", Message: err.Error()}
+// runtimeBridgeError 把 internal/agentdock 的错误转换成带 HTTP 语义的 Runtime 视图错误。
+// 契约错误单独成类：上游返回了 Nexus 无法理解的数据时必须显式暴露，而不是渲染成空列表。
+func runtimeBridgeError(err error) agentDockRuntimeError {
+	var contractErr *agentdock.ContractError
+	if errors.As(err, &contractErr) {
+		return agentDockRuntimeError{
+			Status: http.StatusBadGateway, Code: "AGENTDOCK_RUNTIME_BAD_RESPONSE", Message: contractErr.Error(),
 		}
 	}
-	arguments := map[string]any{"method": method, "path": path}
-	if len(query) > 0 {
-		arguments["query"] = query
+	if errors.Is(err, agentdock.ErrBridgeUnavailable) {
+		return agentDockRuntimeError{
+			Status: http.StatusServiceUnavailable, Code: "AGENTDOCK_CONNECTION_UNAVAILABLE", Message: err.Error(),
+		}
 	}
-	if len(requestBody) > 0 {
-		arguments["body"] = json.RawMessage(requestBody)
+	if errors.Is(err, agentdock.ErrNodeNotFound) {
+		return agentDockRuntimeError{
+			Status: http.StatusNotFound, Code: "AGENTDOCK_NODE_NOT_FOUND", Message: err.Error(),
+		}
 	}
-	result, err := s.agentDockHub.Invoke(requestCtx, nodeID, protocol.OperationRuntimeRequest, arguments)
-	if err != nil {
-		return nil, runtimeBridgeError(err)
+	var lookupErr *agentdock.NodeLookupError
+	if errors.As(err, &lookupErr) {
+		return agentDockRuntimeError{
+			Status: http.StatusServiceUnavailable, Code: "AGENTDOCK_NODE_LOOKUP_FAILED", Message: lookupErr.Error(),
+		}
 	}
-	return result, nil
-}
-
-func runtimeQueryLimitStatus(limit int, status string) url.Values {
-	query := url.Values{}
-	if limit > 0 {
-		query.Set("limit", strconv.Itoa(limit))
+	var remote *agentdock.RemoteError
+	if errors.As(err, &remote) {
+		status := http.StatusInternalServerError
+		switch remote.Category {
+		case "validation":
+			status = http.StatusBadRequest
+		case "not_found":
+			status = http.StatusNotFound
+		case "conflict":
+			status = http.StatusConflict
+		}
+		return agentDockRuntimeError{
+			Status: status, Code: "AGENTDOCK_RUNTIME_REQUEST_FAILED", Message: remote.Error(),
+			UpstreamCode: remote.Code, Category: remote.Category, Retryable: remote.Retryable, Details: remote.Details,
+		}
 	}
-	if strings.TrimSpace(status) != "" && status != "all" {
-		query.Set("status", status)
-	}
-	return query
+	return agentDockRuntimeError{Status: http.StatusServiceUnavailable, Code: "AGENTDOCK_RUNTIME_UNREACHABLE", Message: err.Error()}
 }
 
 func runtimeUnavailablePayload(err error) map[string]any {
@@ -133,34 +111,21 @@ func runtimeErrorHTTPStatus(err error) int {
 		status = converted.Status
 	}
 	switch status {
-	case http.StatusBadRequest, http.StatusNotFound, http.StatusConflict, http.StatusInternalServerError:
+	case http.StatusBadRequest, http.StatusNotFound, http.StatusConflict, http.StatusBadGateway, http.StatusInternalServerError:
 		return status
 	default:
 		return http.StatusServiceUnavailable
 	}
 }
 
-func runtimeBridgeError(err error) agentDockRuntimeError {
-	var remote *agentdock.RemoteError
-	if errors.As(err, &remote) {
-		status := http.StatusInternalServerError
-		switch remote.Category {
-		case "validation":
-			status = http.StatusBadRequest
-		case "not_found":
-			status = http.StatusNotFound
-		case "conflict":
-			status = http.StatusConflict
-		}
-		return agentDockRuntimeError{
-			Status: status, Code: "AGENTDOCK_RUNTIME_REQUEST_FAILED", Message: remote.Error(),
-			UpstreamCode: remote.Code, Category: remote.Category, Retryable: remote.Retryable, Details: remote.Details,
-		}
-	}
-	return agentDockRuntimeError{Status: http.StatusServiceUnavailable, Code: "AGENTDOCK_RUNTIME_UNREACHABLE", Message: err.Error()}
-}
-
 func isRuntimeUnavailable(err error) bool {
 	var runtimeErr agentDockRuntimeError
 	return errors.As(err, &runtimeErr)
+}
+
+// writeRuntimeUnavailable 统一输出 Runtime 视图的错误响应。
+// Hub 返回的是原始错误，必须先经过 runtimeBridgeError 转换，code 与 HTTP 状态才有明确语义。
+func writeRuntimeUnavailable(w http.ResponseWriter, err error) {
+	runtimeErr := runtimeBridgeError(err)
+	writeJSON(w, runtimeErrorHTTPStatus(runtimeErr), runtimeUnavailablePayload(runtimeErr))
 }
