@@ -28,6 +28,7 @@ import (
 	"github.com/uvwt/nexusdock/internal/privatenotes"
 	"github.com/uvwt/nexusdock/internal/recall"
 	"github.com/uvwt/nexusdock/internal/settings"
+	"github.com/uvwt/nexusdock/internal/stage3"
 	"github.com/uvwt/nexusdock/internal/workflow"
 )
 
@@ -95,7 +96,7 @@ type Server struct {
 	mcpSettings          *settings.MCPStore
 	mcpToken             *auth.MCPTokenStore
 	workflowRegistry     *workflow.Registry
-	stage3Wake           chan struct{}
+	evolutionWorker      *stage3.Worker
 	mcpServer            *mcpsdk.Server
 	mcpHandler           http.Handler
 	mcpReconcileMu       sync.Mutex
@@ -114,10 +115,12 @@ func WithSystemDatabase(db *sql.DB) ServerOption {
 	return func(server *Server) { server.db = db }
 }
 
-func WithAgentDockNodes(store *agentdock.Store) ServerOption {
+// WithAgentDockNodes 注入组合根创建的节点存储与连接 Hub；
+// Hub 由组合根持有，保证 REST、MCP 网关与后台 Worker 共享同一批节点连接。
+func WithAgentDockNodes(store *agentdock.Store, hub *agentdock.Hub) ServerOption {
 	return func(server *Server) {
 		server.agentDock = store
-		server.agentDockHub = agentdock.NewHub(store)
+		server.agentDockHub = hub
 	}
 }
 
@@ -159,11 +162,17 @@ func WithWorkflowRegistry(registry *workflow.Registry) ServerOption {
 	return func(server *Server) { server.workflowRegistry = registry }
 }
 
+// WithEvolutionWorker 注入组合根拥有的 Stage 3 进化 Worker；
+// HTTP 层只在运行期 AI 设置保存成功后唤醒它，不参与调度与执行。
+func WithEvolutionWorker(worker *stage3.Worker) ServerOption {
+	return func(server *Server) { server.evolutionWorker = worker }
+}
+
 func NewServer(cfg config.Config, store *recall.Store, logger *slog.Logger, options ...ServerOption) *Server {
 	server := &Server{
 		cfg: cfg, aiCfg: settings.DefaultRuntimeAIConfig(), mcpAppsEnabledState: settings.DefaultMCPAppsEnabled,
 		store: store, logger: logger,
-		stage3Wake: make(chan struct{}, 1), mcpTools: make(map[string]publishedNodeTool), mcpResources: make(map[string]struct{}),
+		mcpTools: make(map[string]publishedNodeTool), mcpResources: make(map[string]struct{}),
 	}
 	for _, option := range options {
 		option(server)

@@ -130,15 +130,8 @@ func (s *Server) applyRuntimeAIConfig(cfg settings.RuntimeAIConfig) {
 	s.embedding = embedding
 	s.mu.Unlock()
 
-	s.notifyStage3ConfigChanged()
-}
-
-func (s *Server) notifyStage3ConfigChanged() {
-	if s.stage3Wake == nil {
-		return
-	}
-	select {
-	case s.stage3Wake <- struct{}{}:
-	default:
+	// Stage 3 调度已交给组合根拥有的 Evolution Worker；这里只负责唤醒，让新配置立即生效。
+	if s.evolutionWorker != nil {
+		s.evolutionWorker.Wake()
 	}
 }
