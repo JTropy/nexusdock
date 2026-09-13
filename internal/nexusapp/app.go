@@ -21,6 +21,7 @@ import (
 	"github.com/uvwt/nexusdock/internal/privatenotes"
 	"github.com/uvwt/nexusdock/internal/recall"
 	"github.com/uvwt/nexusdock/internal/settings"
+	"github.com/uvwt/nexusdock/internal/workflow"
 )
 
 func Main(args []string) int {
@@ -110,6 +111,10 @@ func run(args []string) error {
 		return fmt.Errorf("initialize MCP access token: %w", err)
 	}
 
+	// Workflow 模板注册表以数据目录下的 published 文件为唯一事实来源，
+	// 由组合根显式创建后注入 HTTP 层，REST 与集中式 MCP 工具共用同一实例。
+	workflowRegistry := workflow.NewRegistry(filepath.Join(cfg.NexusDataDir, "workflow-templates"))
+
 	authService := auth.NewService(controlDB)
 	status, err := authService.AdminStatus(ctx)
 	if err != nil {
@@ -138,6 +143,7 @@ func run(args []string) error {
 		httpx.WithMCPAppsEnabled(mcpAppsEnabled),
 		httpx.WithMCPTokenStore(mcpTokenStore),
 		httpx.WithPrivateNotes(privateNoteStore),
+		httpx.WithWorkflowRegistry(workflowRegistry),
 	)
 	httpServer := &http.Server{
 		Addr:              cfg.Addr(),

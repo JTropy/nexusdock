@@ -4,12 +4,14 @@ import (
 	"testing"
 
 	"github.com/uvwt/nexusdock/internal/config"
+	"github.com/uvwt/nexusdock/internal/workflow"
 )
 
 func TestCentralWorkflowTemplateManageUsesNexusRegistry(t *testing.T) {
-	server := &Server{cfg: config.Config{NexusDataDir: t.TempDir()}}
+	dataDir := t.TempDir()
+	server := &Server{cfg: config.Config{NexusDataDir: dataDir}, workflowRegistry: newTestWorkflowRegistry(dataDir)}
 	for _, id := range []string{"development.demo", "development.review"} {
-		if _, err := server.publishWorkflowTemplateValue(testWorkflowTemplate(id, "1.0.0")); err != nil {
+		if _, err := server.workflowRegistry.Publish(testWorkflowTemplate(id, "1.0.0")); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -25,8 +27,8 @@ func TestCentralWorkflowTemplateManageUsesNexusRegistry(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertCentralToolResultMatchesOutputSchema(t, "workflow_template_manage", loaded)
-	template, ok := loaded["template"].(workflowTemplate)
-	if !ok || template.ID != "development.demo" || template.Status != workflowTemplateActive {
+	template, ok := loaded["template"].(workflow.Template)
+	if !ok || template.ID != "development.demo" || template.Status != workflow.StatusActive {
 		t.Fatalf("get=%#v", loaded)
 	}
 
@@ -83,9 +85,10 @@ func TestCentralWorkflowTemplateManageSchemaHasNoNodeID(t *testing.T) {
 }
 
 func TestCentralWorkflowListDefaultsToCurrentVersionPerTemplate(t *testing.T) {
-	server := &Server{cfg: config.Config{NexusDataDir: t.TempDir()}}
+	dataDir := t.TempDir()
+	server := &Server{cfg: config.Config{NexusDataDir: dataDir}, workflowRegistry: newTestWorkflowRegistry(dataDir)}
 	for _, version := range []string{"1.0.0", "2.0.0"} {
-		if _, err := server.publishWorkflowTemplateValue(testWorkflowTemplate("development.current", version)); err != nil {
+		if _, err := server.workflowRegistry.Publish(testWorkflowTemplate("development.current", version)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -109,7 +112,8 @@ func TestCentralWorkflowListDefaultsToCurrentVersionPerTemplate(t *testing.T) {
 }
 
 func TestCentralWorkflowPublishRetireOutputContract(t *testing.T) {
-	server := &Server{cfg: config.Config{NexusDataDir: t.TempDir()}}
+	dataDir := t.TempDir()
+	server := &Server{cfg: config.Config{NexusDataDir: dataDir}, workflowRegistry: newTestWorkflowRegistry(dataDir)}
 	template, err := asMap(testWorkflowTemplate("development.contract", "1.0.0"))
 	if err != nil {
 		t.Fatal(err)

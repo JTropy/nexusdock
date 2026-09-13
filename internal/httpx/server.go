@@ -28,6 +28,7 @@ import (
 	"github.com/uvwt/nexusdock/internal/privatenotes"
 	"github.com/uvwt/nexusdock/internal/recall"
 	"github.com/uvwt/nexusdock/internal/settings"
+	"github.com/uvwt/nexusdock/internal/workflow"
 )
 
 const maxJSONRequestBytes = 2 << 20
@@ -93,6 +94,7 @@ type Server struct {
 	settings             *settings.Store
 	mcpSettings          *settings.MCPStore
 	mcpToken             *auth.MCPTokenStore
+	workflowRegistry     *workflow.Registry
 	stage3Wake           chan struct{}
 	mcpServer            *mcpsdk.Server
 	mcpHandler           http.Handler
@@ -149,6 +151,12 @@ func WithPrivateNotes(store *privatenotes.Store) ServerOption {
 
 func WithMCPTokenStore(store *auth.MCPTokenStore) ServerOption {
 	return func(server *Server) { server.mcpToken = store }
+}
+
+// WithWorkflowRegistry 注入组合根创建的 Workflow 模板注册表；
+// REST 与集中式 MCP workflow 工具共用同一实例。
+func WithWorkflowRegistry(registry *workflow.Registry) ServerOption {
+	return func(server *Server) { server.workflowRegistry = registry }
 }
 
 func NewServer(cfg config.Config, store *recall.Store, logger *slog.Logger, options ...ServerOption) *Server {

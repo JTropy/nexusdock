@@ -2,8 +2,8 @@ package httpx
 
 import (
 	"sort"
-	"strconv"
-	"strings"
+
+	"github.com/uvwt/nexusdock/internal/workflow"
 )
 
 type workflowCounter struct {
@@ -46,6 +46,8 @@ func attachWorkflowTemplateCounters(summary *workflowTemplateSummary, all []work
 	summary.HasConflict = counter.Active > 1
 }
 
+// currentWorkflowTemplates 把全量版本折叠成“每个模板一个当前版本”的视图：
+// active 优先于 retired，其次取更高版本，最后按文件修改时间兜底。
 func currentWorkflowTemplates(all []workflowTemplateSummary) []workflowTemplateSummary {
 	byID := make(map[string][]workflowTemplateSummary)
 	for _, item := range all {
@@ -75,7 +77,7 @@ func workflowTemplateRank(candidate, current workflowTemplateSummary) bool {
 	if candidateRank != currentRank {
 		return candidateRank > currentRank
 	}
-	if cmp := compareWorkflowVersions(candidate.Version, current.Version); cmp != 0 {
+	if cmp := workflow.CompareVersions(candidate.Version, current.Version); cmp != 0 {
 		return cmp > 0
 	}
 	return candidate.UpdatedAt.After(current.UpdatedAt)
@@ -96,33 +98,9 @@ func sortWorkflowTemplates(items []workflowTemplateSummary) {
 		if items[i].ID != items[j].ID {
 			return items[i].ID < items[j].ID
 		}
-		if cmp := compareWorkflowVersions(items[i].Version, items[j].Version); cmp != 0 {
+		if cmp := workflow.CompareVersions(items[i].Version, items[j].Version); cmp != 0 {
 			return cmp > 0
 		}
 		return items[i].UpdatedAt.After(items[j].UpdatedAt)
 	})
-}
-
-func compareWorkflowVersions(a, b string) int {
-	pa := parseWorkflowVersion(a)
-	pb := parseWorkflowVersion(b)
-	for i := 0; i < len(pa); i++ {
-		if pa[i] > pb[i] {
-			return 1
-		}
-		if pa[i] < pb[i] {
-			return -1
-		}
-	}
-	return 0
-}
-
-func parseWorkflowVersion(value string) [3]int {
-	var result [3]int
-	parts := strings.Split(value, ".")
-	for i := 0; i < len(result) && i < len(parts); i++ {
-		parsed, _ := strconv.Atoi(parts[i])
-		result[i] = parsed
-	}
-	return result
 }

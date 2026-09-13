@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/uvwt/nexusdock/internal/config"
 	"github.com/uvwt/nexusdock/internal/core"
@@ -105,33 +104,6 @@ func TestRuntimeAISettingsAPIProtectsSecretsAndAppliesEmbeddingConfiguration(t *
 	}
 	if embeddingAuthorization != "Bearer "+embeddingToken {
 		t.Fatalf("embedding authorization=%q", embeddingAuthorization)
-	}
-}
-
-func TestWorkflowEmbeddingUsesRuntimeAPIKey(t *testing.T) {
-	const token = "workflow-embedding-secret"
-	var authorization string
-	embedding := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		authorization = r.Header.Get("Authorization")
-		_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"index": 0, "embedding": []float64{1, 0}}}})
-	}))
-	defer embedding.Close()
-
-	server := &Server{}
-	vectors, err := server.embedWorkflowTemplateTexts(t.Context(), settings.RuntimeAIConfig{
-		EmbeddingEndpoint: embedding.URL,
-		EmbeddingModel:    "test-embedding",
-		EmbeddingAPIKey:   token,
-		EmbeddingTimeout:  time.Second,
-	}, []string{"workflow text"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(vectors) != 1 || len(vectors[0]) != 2 {
-		t.Fatalf("unexpected vectors: %#v", vectors)
-	}
-	if authorization != "Bearer "+token {
-		t.Fatalf("workflow embedding authorization=%q", authorization)
 	}
 }
 
