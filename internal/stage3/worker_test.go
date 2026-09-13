@@ -95,32 +95,42 @@ func TestWorkerSchedulerRunsImmediatelyWhenReenabled(t *testing.T) {
 	}
 }
 
-func TestWorkerSchedulerKeepsWaitingWhenConfigLoadFails(t *testing.T) {
+func TestWorkerSchedulerRetriesConfigLoadWithoutWake(t *testing.T) {
 	source := &configSource{cfg: WorkerConfig{Enabled: true, Endpoint: "http://model.invalid", Model: "test", Interval: 2 * time.Hour}, fail: true}
 	worker := &Worker{config: source.load, wake: make(chan struct{}, 1)}
 	runs := make(chan struct{}, 2)
-	timersStarted := make(chan time.Duration, 1)
+	timersStarted := make(chan time.Duration, 2)
+	ticks := make(chan time.Time, 2)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	go worker.loop(ctx, time.Now, func(wait time.Duration) workerTimer {
 		timersStarted <- wait
-		return workerTimer{c: make(chan time.Time), stop: func() {}}
+		return workerTimer{c: ticks, stop: func() {}}
 	}, func(context.Context, WorkerConfig) { runs <- struct{}{} })
 
-	// 设置读取失败期间不能带着空配置执行进化分析。
+	// 设置读取失败期间不能带着空配置执行进化分析，并且必须安排自动重试。
+	select {
+	case wait := <-timersStarted:
+		if wait != configRetryInterval {
+			t.Fatalf("config retry wait=%s, want %s", wait, configRetryInterval)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Stage 3 did not schedule config retry")
+	}
 	select {
 	case <-runs:
 		t.Fatal("Stage 3 ran although settings could not be loaded")
-	case <-time.After(50 * time.Millisecond):
+	default:
 	}
 
+	// 控制库恢复后不调用 Wake，仅触发重试计时器，Worker 也应自行恢复执行。
 	source.mu.Lock()
 	source.fail = false
 	source.mu.Unlock()
-	worker.Wake()
+	ticks <- time.Now()
 	select {
 	case <-runs:
 	case <-time.After(time.Second):
-		t.Fatal("Stage 3 did not run after settings recovered")
+		t.Fatal("Stage 3 did not recover after automatic config retry")
 	}
 }

@@ -19,6 +19,9 @@ const (
 	taskDetailPerNode = 8
 	lifecycleLimit    = 50
 	workflowLimit     = 30
+	// 配置读取失败通常是控制库瞬时故障，不能永久依赖设置页 Wake 才恢复。
+	// 一分钟足够避免故障期忙轮询，同时能在无需人工干预的情况下自动恢复后台任务。
+	configRetryInterval = time.Minute
 )
 
 // WorkerConfig 是调度器每一轮需要的 Stage 3 配置切片。
@@ -87,11 +90,12 @@ func (w *Worker) loop(ctx context.Context, now func() time.Time, newTimer func(t
 	for {
 		cfg, err := w.config(ctx)
 		if err != nil {
-			// 读取设置失败通常是控制库瞬时故障；保持上一轮节奏不变，等待下一次设置变化或 ctx 结束。
+			// 读取设置失败通常是控制库瞬时故障。自动按固定间隔重试；设置页 Wake
+			// 仍可提前唤醒，避免数据库已恢复却让 Worker 永久停在等待状态。
 			if w.logger != nil {
-				w.logger.Warn("读取 Stage 3 运行设置失败，等待设置变化后重试", "error", err)
+				w.logger.Warn("读取 Stage 3 运行设置失败，稍后自动重试", "error", err, "retry_after", configRetryInterval)
 			}
-			if !w.wait(ctx) {
+			if !w.waitForConfigRetry(ctx, newTimer) {
 				return
 			}
 			continue
@@ -144,6 +148,20 @@ func (w *Worker) wait(ctx context.Context) bool {
 	case <-ctx.Done():
 		return false
 	case <-w.wake:
+		return true
+	}
+}
+
+func (w *Worker) waitForConfigRetry(ctx context.Context, newTimer func(time.Duration) workerTimer) bool {
+	timer := newTimer(configRetryInterval)
+	select {
+	case <-ctx.Done():
+		timer.stop()
+		return false
+	case <-w.wake:
+		timer.stop()
+		return true
+	case <-timer.c:
 		return true
 	}
 }
