@@ -30,5 +30,11 @@ func (s *Server) systemStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	status["database"] = "ok"
+	// schema_version 返回控制库真实写入的 Schema 版本（PRAGMA user_version），
+	// 启动时 EnsureSchema 已把它推进到 core.CurrentSchemaVersion，这里如实上报。
+	var schemaVersion int
+	if err := s.db.QueryRowContext(r.Context(), `PRAGMA user_version`).Scan(&schemaVersion); err == nil {
+		status["schema_version"] = schemaVersion
+	}
 	writeJSON(w, http.StatusOK, status)
 }
