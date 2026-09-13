@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -15,19 +14,18 @@ import (
 	"time"
 )
 
-// OperationError 把注册表的业务失败带上稳定的错误码（以及给 HTTP 用的状态码），
-// HTTP/MCP 边界据此映射响应，不再各自翻译错误字符串。
+// OperationError 把注册表的业务失败带上稳定错误码。
+// HTTP/MCP 边界负责把业务错误码映射成各自协议语义，workflow 包不依赖传输层。
 type OperationError struct {
-	Status int
-	Code   string
-	err    error
+	Code string
+	err  error
 }
 
 func (e *OperationError) Error() string { return e.err.Error() }
 func (e *OperationError) Unwrap() error { return e.err }
 
-func operationError(status int, code string, err error) error {
-	return &OperationError{Status: status, Code: code, err: err}
+func operationError(code string, err error) error {
+	return &OperationError{Code: code, err: err}
 }
 
 // Registry 是 NexusDock 自有 Workflow 模板注册表：published 目录下的
@@ -80,15 +78,15 @@ func (r *Registry) Publish(input Template) (Template, error) {
 	t.PublishedAt = nil
 	t.RetiredAt = nil
 	if err := r.ensureDirs(); err != nil {
-		return Template{}, operationError(http.StatusConflict, "WORKFLOW_REGISTRY_FAILED", err)
+		return Template{}, operationError("WORKFLOW_REGISTRY_FAILED", err)
 	}
 	if err := validateTemplate(t); err != nil {
-		return Template{}, operationError(http.StatusBadRequest, "INVALID_WORKFLOW_TEMPLATE", err)
+		return Template{}, operationError("INVALID_WORKFLOW_TEMPLATE", err)
 	}
 	if _, err := os.Stat(r.templatePath("published", t.ID, t.Version)); err == nil {
-		return Template{}, operationError(http.StatusConflict, "WORKFLOW_VERSION_IMMUTABLE", errors.New("published template version already exists and cannot be overwritten"))
+		return Template{}, operationError("WORKFLOW_VERSION_IMMUTABLE", errors.New("published template version already exists and cannot be overwritten"))
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return Template{}, operationError(http.StatusConflict, "WORKFLOW_REGISTRY_FAILED", err)
+		return Template{}, operationError("WORKFLOW_REGISTRY_FAILED", err)
 	}
 
 	now := time.Now().UTC()
@@ -96,7 +94,7 @@ func (r *Registry) Publish(input Template) (Template, error) {
 	t.Hash = templateHash(t)
 	errorCode, err := r.publishWithWriter(t, now, writeTemplateJSON)
 	if err != nil {
-		return Template{}, operationError(http.StatusConflict, errorCode, err)
+		return Template{}, operationError(errorCode, err)
 	}
 	return t, nil
 }
@@ -104,20 +102,20 @@ func (r *Registry) Publish(input Template) (Template, error) {
 // Retire 显式退役一个 active 版本；已退役版本再次退役会被拒绝。
 func (r *Registry) Retire(id, version string) (Template, error) {
 	if !ValidToken(id) || !ValidToken(version) {
-		return Template{}, operationError(http.StatusBadRequest, "INVALID_WORKFLOW_TEMPLATE", errors.New("template id or version is invalid"))
+		return Template{}, operationError("INVALID_WORKFLOW_TEMPLATE", errors.New("template id or version is invalid"))
 	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if err := r.ensureDirs(); err != nil {
-		return Template{}, operationError(http.StatusConflict, "WORKFLOW_REGISTRY_FAILED", err)
+		return Template{}, operationError("WORKFLOW_REGISTRY_FAILED", err)
 	}
 	t, err := r.load("published", id, version)
 	if err != nil {
-		return Template{}, operationError(http.StatusNotFound, "WORKFLOW_TEMPLATE_NOT_FOUND", err)
+		return Template{}, operationError("WORKFLOW_TEMPLATE_NOT_FOUND", err)
 	}
 	if t.Status != StatusActive {
-		return Template{}, operationError(http.StatusBadRequest, "WORKFLOW_TEMPLATE_NOT_ACTIVE", errors.New("only active templates can be retired"))
+		return Template{}, operationError("WORKFLOW_TEMPLATE_NOT_ACTIVE", errors.New("only active templates can be retired"))
 	}
 
 	now := time.Now().UTC()
@@ -125,7 +123,7 @@ func (r *Registry) Retire(id, version string) (Template, error) {
 	t.RetiredAt = &now
 	t.Hash = templateHash(t)
 	if err := writeTemplateJSON(r.templatePath("published", id, version), t); err != nil {
-		return Template{}, operationError(http.StatusConflict, "WORKFLOW_RETIRE_FAILED", err)
+		return Template{}, operationError("WORKFLOW_RETIRE_FAILED", err)
 	}
 	return t, nil
 }

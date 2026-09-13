@@ -20,9 +20,10 @@ func (r *Registry) Match(ctx context.Context, ai AIConfig, goal, device, taskTyp
 		return nil, err
 	}
 	templates = LatestVersions(templates)
+	generation := templateGeneration(templates)
 	var index *VectorIndex
 	if ai.VectorEnabled() && strings.TrimSpace(goal) != "" {
-		if loaded, loadErr := r.loadVectorIndex(ai.Model); loadErr == nil && len(loaded.Documents) > 0 {
+		if loaded, loadErr := r.loadVectorIndex(ai.Model, generation); loadErr == nil && len(loaded.Documents) > 0 {
 			index = &loaded
 		}
 	}

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -211,6 +212,12 @@ func LatestVersions(templates []Template) []Template {
 	for _, template := range byID {
 		out = append(out, template)
 	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ID == out[j].ID {
+			return CompareVersions(out[i].Version, out[j].Version) > 0
+		}
+		return out[i].ID < out[j].ID
+	})
 	return out
 }
 

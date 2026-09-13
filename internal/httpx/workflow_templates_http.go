@@ -26,7 +26,14 @@ func (s *Server) registerWorkflowTemplateRoutes(mux *http.ServeMux, protected fu
 func writeWorkflowOperationError(w http.ResponseWriter, err error) {
 	var operationErr *workflow.OperationError
 	if errors.As(err, &operationErr) {
-		writeError(w, operationErr.Status, operationErr.Code, operationErr.Error())
+		status := http.StatusConflict
+		switch operationErr.Code {
+		case "INVALID_WORKFLOW_TEMPLATE", "WORKFLOW_TEMPLATE_NOT_ACTIVE":
+			status = http.StatusBadRequest
+		case "WORKFLOW_TEMPLATE_NOT_FOUND":
+			status = http.StatusNotFound
+		}
+		writeError(w, status, operationErr.Code, operationErr.Error())
 		return
 	}
 	writeError(w, http.StatusConflict, "WORKFLOW_REGISTRY_FAILED", err.Error())

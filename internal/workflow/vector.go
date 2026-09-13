@@ -3,6 +3,8 @@ package workflow
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,9 +22,13 @@ import (
 // maxEmbeddingResponseBytes 限制 embedding 响应体大小，防止异常上游耗尽内存。
 const maxEmbeddingResponseBytes = 32 << 20
 
-// errVectorIndexStale 表示索引文件的 embedding 模型与当前配置不一致；
+// errVectorIndexStale 表示索引文件的 embedding 模型或 Registry generation 已过期；
 // 状态报告按 stale 处理（提示重建），而不是当成索引损坏。
 var errVectorIndexStale = errors.New("workflow vector index is stale")
+
+// errRegistryChangedDuringReindex 表示 embedding 网络调用期间模板集合发生了变化。
+// 旧快照生成的索引不能覆盖到新一代 Registry 上，调用方应重新触发重建。
+var errRegistryChangedDuringReindex = errors.New("workflow registry changed while vector index was rebuilding")
 
 // 向量索引状态；这些值会原样出现在 HTTP/MCP 响应的 vector_index_status 字段里。
 const (
@@ -52,10 +58,11 @@ func (c AIConfig) VectorEnabled() bool {
 // VectorIndex 是 published 目录旁 vector-index.json 的完整结构，
 // key 形如 "<id>@<version>"；文件与模板一样使用严格 JSON 解码。
 type VectorIndex struct {
-	Model     string                    `json:"model"`
-	Dimension int                       `json:"dimension,omitempty"`
-	UpdatedAt time.Time                 `json:"updated_at"`
-	Documents map[string]VectorDocument `json:"documents"`
+	Model      string                    `json:"model"`
+	Generation string                    `json:"generation"`
+	Dimension  int                       `json:"dimension,omitempty"`
+	UpdatedAt  time.Time                 `json:"updated_at"`
+	Documents  map[string]VectorDocument `json:"documents"`
 }
 
 type VectorDocument struct {
@@ -93,7 +100,17 @@ func (r *Registry) VectorIndexInfo(ai AIConfig) (string, int) {
 	if !ai.VectorEnabled() {
 		return VectorIndexNotConfigured, 0
 	}
-	idx, err := r.loadVectorIndex(ai.Model)
+	r.mu.Lock()
+	_, generation, generationErr := r.activeTemplatesAndGenerationLocked()
+	var idx VectorIndex
+	var err error
+	if generationErr == nil {
+		idx, err = r.loadVectorIndex(ai.Model, generation)
+	}
+	r.mu.Unlock()
+	if generationErr != nil {
+		return VectorIndexInvalid, 0
+	}
 	if err != nil {
 		switch {
 		case errors.Is(err, os.ErrNotExist):
@@ -113,12 +130,18 @@ func (r *Registry) VectorIndexSnapshot(ai AIConfig) (VectorIndexSnapshot, error)
 	if !ai.VectorEnabled() {
 		return VectorIndexSnapshot{Status: VectorIndexNotConfigured}, nil
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, generation, err := r.activeTemplatesAndGenerationLocked()
+	if err != nil {
+		return VectorIndexSnapshot{}, err
+	}
 	path := r.vectorIndexPath()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return VectorIndexSnapshot{Status: VectorIndexMissing}, nil
 	}
-	idx, err := decodeVectorIndex(data, ai.Model)
+	idx, err := decodeVectorIndex(data, ai.Model, generation)
 	if errors.Is(err, errVectorIndexStale) {
 		return VectorIndexSnapshot{Status: VectorIndexStale, Model: ai.Model}, nil
 	}
@@ -140,12 +163,11 @@ func (r *Registry) ReindexVectors(ctx context.Context, ai AIConfig) (ReindexResu
 		return ReindexResult{}, errors.New("workflow template vector search is disabled; configure and enable vector search")
 	}
 	r.mu.Lock()
-	templates, err := r.listLocked(StatusActive)
+	templates, generation, err := r.activeTemplatesAndGenerationLocked()
 	r.mu.Unlock()
 	if err != nil {
 		return ReindexResult{}, err
 	}
-	templates = LatestVersions(templates)
 	texts := make([]string, 0, len(templates))
 	for _, t := range templates {
 		texts = append(texts, vectorText(t))
@@ -157,7 +179,7 @@ func (r *Registry) ReindexVectors(ctx context.Context, ai AIConfig) (ReindexResu
 	if len(vectors) != len(templates) {
 		return ReindexResult{}, fmt.Errorf("embedding response count mismatch: got %d want %d", len(vectors), len(templates))
 	}
-	idx := VectorIndex{Model: ai.Model, UpdatedAt: time.Now().UTC(), Documents: map[string]VectorDocument{}}
+	idx := VectorIndex{Model: ai.Model, Generation: generation, UpdatedAt: time.Now().UTC(), Documents: map[string]VectorDocument{}}
 	if len(vectors) > 0 {
 		idx.Dimension = len(vectors[0])
 	}
@@ -166,14 +188,22 @@ func (r *Registry) ReindexVectors(ctx context.Context, ai AIConfig) (ReindexResu
 			return ReindexResult{}, fmt.Errorf("embedding dimension mismatch at result %d: got %d want %d", i, len(vectors[i]), idx.Dimension)
 		}
 		key := t.ID + "@" + t.Version
-		idx.Documents[key] = VectorDocument{ID: t.ID, Version: t.Version, Hash: t.Hash, Text: texts[i], Vector: vectors[i], UpdatedAt: time.Now().UTC()}
+		idx.Documents[key] = VectorDocument{ID: t.ID, Version: t.Version, Hash: templateHash(t), Text: texts[i], Vector: vectors[i], UpdatedAt: time.Now().UTC()}
 	}
 	if err := validateVectorIndex(idx, ai.Model); err != nil {
 		return ReindexResult{}, err
 	}
-	// 索引文件与模板文件同目录，写入同样要持锁，避免与发布/退役交错。
+	// embedding 网络调用期间不持锁；落盘前必须确认 active 模板 generation 没变，
+	// 否则旧快照会覆盖到新一代 Registry 上。
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	_, currentGeneration, err := r.activeTemplatesAndGenerationLocked()
+	if err != nil {
+		return ReindexResult{}, err
+	}
+	if currentGeneration != generation {
+		return ReindexResult{}, errRegistryChangedDuringReindex
+	}
 	if err := writeTemplateJSON(r.vectorIndexPath(), idx); err != nil {
 		return ReindexResult{}, err
 	}
@@ -184,16 +214,17 @@ func (r *Registry) vectorIndexPath() string {
 	return filepath.Join(r.root, "vector-index.json")
 }
 
-func (r *Registry) loadVectorIndex(model string) (VectorIndex, error) {
+func (r *Registry) loadVectorIndex(model, generation string) (VectorIndex, error) {
 	data, err := os.ReadFile(r.vectorIndexPath())
 	if err != nil {
 		return VectorIndex{}, err
 	}
-	return decodeVectorIndex(data, model)
+	return decodeVectorIndex(data, model, generation)
 }
 
 // decodeVectorIndex 使用严格 JSON 解码并立即校验，坏文件不会带出半可用索引。
-func decodeVectorIndex(data []byte, model string) (VectorIndex, error) {
+// 旧版索引没有 generation，升级后会自然报告 stale 并等待重建，而不是误报损坏。
+func decodeVectorIndex(data []byte, model, generation string) (VectorIndex, error) {
 	var idx VectorIndex
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
@@ -208,6 +239,9 @@ func decodeVectorIndex(data []byte, model string) (VectorIndex, error) {
 	}
 	if err := validateVectorIndex(idx, model); err != nil {
 		return VectorIndex{}, err
+	}
+	if strings.TrimSpace(idx.Generation) == "" || (generation != "" && idx.Generation != generation) {
+		return VectorIndex{}, fmt.Errorf("%w: registry generation does not match", errVectorIndexStale)
 	}
 	return idx, nil
 }
@@ -240,6 +274,31 @@ func validateVectorIndex(idx VectorIndex, model string) error {
 		}
 	}
 	return nil
+}
+
+// activeTemplatesAndGenerationLocked 返回当前参与 match 的模板集合及其 generation。
+// 调用方必须持有 r.mu；generation 只取每个 ID 的最新 active 版本，并把模板内容哈希
+// 纳入摘要，因此发布、退役或文件内容变化都会让既有向量索引立即变成 stale。
+func (r *Registry) activeTemplatesAndGenerationLocked() ([]Template, string, error) {
+	templates, err := r.listLocked(StatusActive)
+	if err != nil {
+		return nil, "", err
+	}
+	templates = LatestVersions(templates)
+	return templates, templateGeneration(templates), nil
+}
+
+func templateGeneration(templates []Template) string {
+	hash := sha256.New()
+	for _, template := range templates {
+		_, _ = io.WriteString(hash, template.ID)
+		_, _ = io.WriteString(hash, "\x00")
+		_, _ = io.WriteString(hash, template.Version)
+		_, _ = io.WriteString(hash, "\x00")
+		_, _ = io.WriteString(hash, templateHash(template))
+		_, _ = io.WriteString(hash, "\n")
+	}
+	return "sha256:" + hex.EncodeToString(hash.Sum(nil))
 }
 
 // vectorScores 用当前目标文本查询 embedding 端点并对索引文档做余弦打分。
