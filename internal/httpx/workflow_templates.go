@@ -5,8 +5,12 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/uvwt/nexusdock/internal/workflow"
 )
 
+// workflowTemplateSummary 是模板在 HTTP/MCP 响应里的展示视图：
+// 在业务模板之上补充文件名、相对路径与文件元数据，方便前端直接渲染列表。
 type workflowTemplateSummary struct {
 	ID           string    `json:"id"`
 	Version      string    `json:"version"`
@@ -25,10 +29,15 @@ type workflowTemplateSummary struct {
 	HasConflict  bool      `json:"has_conflict,omitempty"`
 }
 
-func (s *Server) workflowTemplateSummary(t workflowTemplate) workflowTemplateSummary {
+func (s *Server) workflowTemplateSummary(t workflow.Template) workflowTemplateSummary {
 	summary := workflowTemplateSummaryFromTemplate(t)
 	s.attachWorkflowTemplateFileMetadata(&summary)
 	return summary
+}
+
+func workflowTemplateSummaryFromTemplate(t workflow.Template) workflowTemplateSummary {
+	fileName := t.ID + "@" + t.Version + ".json"
+	return workflowTemplateSummary{ID: t.ID, Version: t.Version, Title: firstNonEmptyString(t.Title, t.ID), Description: t.Description, Status: string(t.Status), FileName: fileName, Path: filepath.ToSlash(filepath.Join("workflow-templates", "published", fileName)), StepCount: len(t.Steps), Keywords: t.Match.Keywords}
 }
 
 func (s *Server) attachWorkflowTemplateFileMetadata(summary *workflowTemplateSummary) {
@@ -36,7 +45,7 @@ func (s *Server) attachWorkflowTemplateFileMetadata(summary *workflowTemplateSum
 		return
 	}
 	summary.Path = filepath.ToSlash(filepath.Join("workflow-templates", "published", summary.FileName))
-	info, err := os.Stat(s.workflowTemplatePath("published", summary.ID, summary.Version))
+	info, err := os.Stat(s.workflowRegistry.PublishedFilePath(summary.ID, summary.Version))
 	if err != nil {
 		return
 	}
@@ -55,4 +64,13 @@ func templateSummaryMatches(summary workflowTemplateSummary, query string) bool 
 		}
 	}
 	return false
+}
+
+// workflowTemplateCompactList 是列表响应里的紧凑模板视图，字段是模板的业务字段全集。
+func workflowTemplateCompactList(templates []workflow.Template) []map[string]any {
+	out := make([]map[string]any, 0, len(templates))
+	for _, t := range templates {
+		out = append(out, map[string]any{"id": t.ID, "version": t.Version, "title": t.Title, "description": t.Description, "status": t.Status, "match": t.Match, "completion_conditions": t.CompletionConditions, "steps": t.Steps, "step_count": len(t.Steps), "hash": t.Hash, "published_at": t.PublishedAt, "retired_at": t.RetiredAt})
+	}
+	return out
 }

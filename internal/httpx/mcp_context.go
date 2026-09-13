@@ -12,6 +12,7 @@ import (
 	"github.com/uvwt/agentdock-protocol/mcpcontract"
 	"github.com/uvwt/nexusdock/internal/agentdock"
 	"github.com/uvwt/nexusdock/internal/recall"
+	"github.com/uvwt/nexusdock/internal/workflow"
 )
 
 const (
@@ -238,11 +239,11 @@ func (s *Server) buildFleetAgentDockSharedContext() fleetAgentDockSharedContext 
 		Rules:             append([]string(nil), nexusSharedAgentDockRules...),
 	}
 
-	templates, err := s.listWorkflowTemplates(workflowTemplateActive)
+	templates, err := s.workflowRegistry.List(workflow.StatusActive)
 	if err != nil {
 		shared.Warnings = append(shared.Warnings, agentDockContextWarning{Source: "workflow_templates", Message: "工作流模板索引暂不可用；需要时仍可调用 workflow_template_manage 精确确认。"})
 	} else {
-		for _, template := range latestWorkflowTemplateVersions(templates) {
+		for _, template := range workflow.LatestVersions(templates) {
 			shared.WorkflowTemplates = append(shared.WorkflowTemplates, agentDockContextItem{Name: template.ID, Description: firstNonEmptyString(template.Title, template.ID)})
 		}
 	}

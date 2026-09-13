@@ -56,9 +56,9 @@ func TestFleetSharedContextComesDirectlyFromNexus(t *testing.T) {
 	if _, err := store.Write(recall.WriteRequest{Path: "profile.md", Content: "# Profile\n\nNexus-owned memory.\n", Confirmed: true}); err != nil {
 		t.Fatal(err)
 	}
-	server := &Server{cfg: config.Config{NexusDataDir: dataDir}, store: store}
+	server := &Server{cfg: config.Config{NexusDataDir: dataDir}, store: store, workflowRegistry: newTestWorkflowRegistry(dataDir)}
 	template := testWorkflowTemplate("central-context", "1.0.0")
-	if _, err := server.publishWorkflowTemplateValue(template); err != nil {
+	if _, err := server.workflowRegistry.Publish(template); err != nil {
 		t.Fatal(err)
 	}
 
@@ -122,6 +122,7 @@ func TestCallFleetAgentDockContextAggregatesOnlineAndOfflineNodes(t *testing.T) 
 	server := &Server{
 		cfg: config.Config{NexusDataDir: t.TempDir()}, store: recallStore,
 		agentDock: store, agentDockHub: hub,
+		workflowRegistry: newTestWorkflowRegistry(t.TempDir()),
 	}
 
 	result, err := server.callFleetAgentDockContext(t.Context())
@@ -165,11 +166,13 @@ func TestFleetContextKeepsNexusSharedContextWhenAllNodesAreOffline(t *testing.T)
 	if _, err := recallStore.Write(recall.WriteRequest{Path: "profile.md", Content: "# Profile\n\nShared memory survives offline nodes.\n", Confirmed: true}); err != nil {
 		t.Fatal(err)
 	}
+	dataDir := t.TempDir()
 	server := &Server{
-		cfg: config.Config{NexusDataDir: t.TempDir()}, store: recallStore,
+		cfg: config.Config{NexusDataDir: dataDir}, store: recallStore,
 		agentDock: nodeStore, agentDockHub: agentdock.NewHub(nodeStore),
+		workflowRegistry: newTestWorkflowRegistry(dataDir),
 	}
-	if _, err := server.publishWorkflowTemplateValue(testWorkflowTemplate("offline.shared", "1.0.0")); err != nil {
+	if _, err := server.workflowRegistry.Publish(testWorkflowTemplate("offline.shared", "1.0.0")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -316,6 +319,7 @@ func TestFleetContextReturnsPartialResultWhenNodeContextTimesOut(t *testing.T) {
 	server := &Server{
 		cfg: config.Config{NexusDataDir: t.TempDir()}, store: recallStore,
 		agentDock: store, agentDockHub: hub,
+		workflowRegistry: newTestWorkflowRegistry(t.TempDir()),
 	}
 
 	started := time.Now()

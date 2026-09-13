@@ -12,6 +12,7 @@ import (
 	"github.com/uvwt/nexusdock/internal/recall"
 	"github.com/uvwt/nexusdock/internal/settings"
 	"github.com/uvwt/nexusdock/internal/stage3"
+	"github.com/uvwt/nexusdock/internal/workflow"
 )
 
 const (
@@ -232,15 +233,15 @@ func (s *Server) stage3Snapshot(ctx context.Context) (stage3.Snapshot, []agentdo
 		}
 	}
 
-	workflows, err := s.listWorkflowTemplates(workflowTemplateActive)
+	workflows, err := s.workflowRegistry.List(workflow.StatusActive)
 	if err == nil {
-		workflows = latestWorkflowTemplateVersions(workflows)
+		workflows = workflow.LatestVersions(workflows)
 		if len(workflows) > stage3WorkflowLimit {
 			workflows = workflows[:stage3WorkflowLimit]
 		}
-		for _, workflow := range workflows {
+		for _, template := range workflows {
 			snapshot.Workflows = append(snapshot.Workflows, stage3.WorkflowFact{
-				ID: workflow.ID, Version: workflow.Version, Title: workflow.Title, Description: workflow.Description, Type: workflow.Match.Type,
+				ID: template.ID, Version: template.Version, Title: template.Title, Description: template.Description, Type: template.Match.Type,
 			})
 		}
 	}
