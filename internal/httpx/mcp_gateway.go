@@ -13,7 +13,6 @@ import (
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	protocol "github.com/uvwt/agentdock-protocol"
-	"github.com/uvwt/agentdock-protocol/mcpcontract"
 	"github.com/uvwt/nexusdock/internal/agentdock"
 	"github.com/uvwt/nexusdock/internal/privatenotes"
 	"github.com/uvwt/nexusdock/internal/recall"
@@ -34,12 +33,13 @@ func (s *Server) initializeMCPGateway() {
 		},
 	)
 	s.registerCentralTools()
+	s.bindPublishedToolBridge()
 	if s.agentDockHub != nil {
 		s.agentDockHub.SetHelloHandler(s.registerNodeTools)
 	}
-	if s.agentDock != nil {
+	if s.agentDock != nil && s.publishedToolBridge != nil {
 		ctx := context.Background()
-		if err := s.loadPublishedNodeTools(ctx); err != nil && s.logger != nil {
+		if err := s.publishedToolBridge.LoadPublished(ctx); err != nil && s.logger != nil {
 			s.logger.Warn("恢复 AgentDock 公开工具契约失败", "error", err)
 		}
 		if nodes, err := s.agentDock.List(ctx); err == nil {
@@ -51,7 +51,7 @@ func (s *Server) initializeMCPGateway() {
 			}
 		}
 		// 启动时也核对一次已发布目录，清理旧版本遗留但 fleet 已不再提供的 stale tool。
-		s.reconcileNodeToolContracts(s.publishedNodeToolNames())
+		s.publishedToolBridge.ReconcilePublished()
 	}
 	// Nexus 自有的 Context / Recall / Workflow Apps 不依赖任何 AgentDock 节点，启动时始终注册。
 	s.syncMCPAppResources()
@@ -59,6 +59,31 @@ func (s *Server) initializeMCPGateway() {
 		func(*http.Request) *mcpsdk.Server { return s.mcpServer },
 		&mcpsdk.StreamableHTTPOptions{Stateless: true, JSONResponse: true, MaxRequestBodyBytes: 1 << 20, PropagateRequestCancellation: true},
 	)
+}
+
+// bindPublishedToolBridge 把契约 Bridge 的公开/退休回调映射为 MCP SDK 的工具注册与下架。
+// Bridge 只维护契约业务状态；这里是它触碰 MCP 协议实现的唯一边界。
+func (s *Server) bindPublishedToolBridge() {
+	if s.publishedToolBridge == nil {
+		return
+	}
+	s.publishedToolBridge.SetPublishHandlers(s.publishNodeTool, s.retireNodeTool)
+}
+
+// publishNodeTool 把 Bridge 公开的 fleet 契约映射为 MCP 工具注册（含 MCP Apps 展示元数据过滤）。
+func (s *Server) publishNodeTool(descriptor agentdock.ToolDescriptor) {
+	if s.mcpServer == nil {
+		return
+	}
+	s.mcpServer.AddTool(nodeMCPToolWithApps(descriptor, s.mcpAppsEnabled()), s.nodeToolHandler(descriptor.Name))
+}
+
+// retireNodeTool 把 Bridge 的工具下架映射为 MCP SDK 的工具移除。
+func (s *Server) retireNodeTool(toolName string) {
+	if s.mcpServer == nil {
+		return
+	}
+	s.mcpServer.RemoveTools(toolName)
 }
 
 func (s *Server) registerCentralTools() {
@@ -105,74 +130,30 @@ func (s *Server) setMCPAppsEnabled(enabled bool) {
 
 	// MCP Apps UI 只属于展示层；刷新对外工具和资源，不改节点持久化 descriptor。
 	s.registerCentralTools()
-	s.mcpToolsMu.RLock()
-	published := make([]publishedNodeTool, 0, len(s.mcpTools))
-	for _, tool := range s.mcpTools {
-		published = append(published, tool)
-	}
-	s.mcpToolsMu.RUnlock()
-	for _, tool := range published {
-		s.mcpServer.AddTool(nodeMCPToolWithApps(tool.Descriptor, enabled), s.nodeToolHandler(tool.Descriptor.Name))
+	if s.publishedToolBridge != nil {
+		for _, published := range s.publishedToolBridge.PublishedTools() {
+			s.mcpServer.AddTool(nodeMCPToolWithApps(published.Descriptor, enabled), s.nodeToolHandler(published.Descriptor.Name))
+		}
 	}
 	s.syncMCPAppResources()
 }
 
+// registerNodeTools 处理节点 Hello 快照：契约收敛业务由 Bridge 负责，
+// 这里只在工具注册集合可能变化后同步一次 MCP Apps 资源目录。
 func (s *Server) registerNodeTools(node agentdock.Node, hello agentdock.Hello) {
-	defer s.syncMCPAppResources()
-	helloToolNames := make(map[string]struct{}, len(hello.Tools))
-	for _, descriptor := range hello.Tools {
-		if mcpcontract.IsCanonicalTool(descriptor.Name) || strings.TrimSpace(descriptor.Name) == "" {
-			continue
-		}
-		helloToolNames[descriptor.Name] = struct{}{}
-		contractHash, err := toolContractHash(descriptor)
-		if err != nil {
-			if s.logger != nil {
-				s.logger.Warn("计算 AgentDock 工具契约失败", "node_id", node.ID, "tool", descriptor.Name, "error", err)
-			}
-			continue
-		}
-
-		name := descriptor.Name
-		candidate := publishedNodeTool{
-			Descriptor: descriptor, ContractHash: contractHash,
-			AcceptedSemanticHashes: []string{contractHash},
-		}
-		s.mcpToolsMu.Lock()
-		published, exists := s.mcpTools[name]
-		if !exists {
-			// 首次出现的契约先持久化再公开，确保 Nexus 重启后仍沿用同一个 schema。
-			if err := s.persistPublishedNodeTool(context.Background(), candidate); err != nil {
-				s.mcpToolsMu.Unlock()
-				if s.logger != nil {
-					s.logger.Warn("保存 AgentDock 公开工具契约失败", "node_id", node.ID, "tool", name, "error", err)
-				}
-				continue
-			}
-			s.mcpServer.AddTool(nodeMCPToolWithApps(descriptor, s.mcpAppsEnabled()), s.nodeToolHandler(name))
-			s.mcpTools[name] = candidate
-		}
-		s.mcpToolsMu.Unlock()
-		if exists && (published.ContractHash != contractHash ||
-			!containsToolContractHash(published.AcceptedSemanticHashes, contractHash) ||
-			!jsonValuesEqual(published.Descriptor.Meta, descriptor.Meta) ||
-			!jsonValuesEqual(published.Descriptor.Annotations, descriptor.Annotations)) {
-			// schema 不同不等于不兼容；由 Fleet 合并器决定能否安全形成同一代公开契约。
-			if err := s.reconcileFleetNodeTool(name); err != nil && s.logger != nil {
-				s.logger.Warn("检查 AgentDock 工具契约兼容性失败", "tool", name, "error", err)
-			}
-		}
+	if s.publishedToolBridge != nil {
+		s.publishedToolBridge.ObserveNodeHello(node, hello)
 	}
+	s.syncMCPAppResources()
+}
 
-	// Hello 是当前节点完整能力快照。已公开但本次不再上报的工具也要重新核对，
-	// 这样最后一个 provider 真正移除能力时才会退休工具，而不是永久留下 stale schema。
-	missingPublished := make([]string, 0)
-	for _, name := range s.publishedNodeToolNames() {
-		if _, present := helloToolNames[name]; !present {
-			missingPublished = append(missingPublished, name)
-		}
+// reconcileNodeTools 在节点启停、删除或能力变化后触发 fleet 工具契约重算，
+// 并在工具注册集合可能变化后同步 MCP Apps 资源目录。
+func (s *Server) reconcileNodeTools(descriptors []agentdock.ToolDescriptor) {
+	if s.publishedToolBridge != nil {
+		s.publishedToolBridge.ReconcileNodeTools(descriptors)
 	}
-	s.reconcileNodeToolContracts(missingPublished)
+	s.syncMCPAppResources()
 }
 
 func nodeMCPTool(descriptor agentdock.ToolDescriptor) *mcpsdk.Tool {
@@ -230,7 +211,10 @@ func (s *Server) callNodeTool(ctx context.Context, name string, arguments map[st
 		return s.gatewayToolResult(name, nil, fmt.Errorf("AgentDock node %s does not provide tool %s", nodeID, name))
 	}
 
-	mismatch, err := s.nodeToolContractMismatch(ctx, node, name)
+	if s.publishedToolBridge == nil {
+		return s.gatewayToolResult(name, nil, fmt.Errorf("Nexus 公开工具契约不存在: %s", name))
+	}
+	mismatch, err := s.publishedToolBridge.ToolContractMismatch(ctx, node, name)
 	if err != nil {
 		return s.gatewayToolResult(name, nil, err)
 	}

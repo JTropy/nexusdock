@@ -146,7 +146,7 @@ func (s *Server) agentDockNodeUpdate(w http.ResponseWriter, r *http.Request) {
 				s.logger.Warn("读取 AgentDock 节点工具契约失败", "node_id", node.ID, "error", descriptorErr)
 			}
 		} else {
-			s.reconcileNodeToolContracts(toolDescriptorNames(descriptors))
+			s.reconcileNodeTools(descriptors)
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "node": node})
@@ -171,7 +171,7 @@ func (s *Server) agentDockNodeDelete(w http.ResponseWriter, r *http.Request) {
 			s.logger.Warn("读取待删除 AgentDock 节点工具契约失败", "node_id", id, "error", descriptorErr)
 		}
 	} else {
-		s.reconcileNodeToolContracts(toolDescriptorNames(descriptors))
+		s.reconcileNodeTools(descriptors)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "node_id": id, "deleted": true})
 }

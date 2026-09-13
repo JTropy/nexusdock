@@ -105,10 +105,11 @@ func TestCallNodeToolKeepsSuccessWhenArtifactDecorationFails(t *testing.T) {
 		agentDock:    store,
 		agentDockHub: hub,
 		mcpServer:    mcpsdk.NewServer(&mcpsdk.Implementation{Name: "test", Version: "1"}, nil),
-		mcpTools:     make(map[string]publishedNodeTool),
 		mcpResources: make(map[string]struct{}),
 		logger:       slog.Default(),
 	}
+	server.publishedToolBridge = agentdock.NewPublishedToolBridge(store, slog.Default())
+	server.bindPublishedToolBridge()
 	server.registerNodeTools(node, agentdock.Hello{Tools: []agentdock.ToolDescriptor{descriptor}})
 
 	result, err := server.callNodeTool(t.Context(), descriptor.Name, map[string]any{"node_id": node.ID})

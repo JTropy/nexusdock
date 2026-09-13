@@ -1,8 +1,7 @@
-package httpx
+package agentdock
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -10,28 +9,23 @@ import (
 	"reflect"
 	"sort"
 	"strings"
-
-	"github.com/uvwt/agentdock-protocol/mcpcontract"
-	"github.com/uvwt/nexusdock/internal/agentdock"
 )
 
 const maxToolContractDifferences = 5
 
+// errIncompatibleToolContract 表示不同 provider 的工具契约无法合并成同一代公开契约。
 var errIncompatibleToolContract = errors.New("AgentDock 工具契约不可安全合并")
 
-type publishedNodeTool struct {
-	Descriptor             agentdock.ToolDescriptor
-	ContractHash           string
-	AcceptedSemanticHashes []string
-}
-
-type toolContractDifference struct {
+// ToolContractDifference 描述公开契约与节点现场契约之间的单点差异，用于 MCP 错误详情回显。
+type ToolContractDifference struct {
 	Path      string `json:"path"`
 	Published any    `json:"published"`
 	Node      any    `json:"node"`
 }
 
-type toolContractMismatch struct {
+// ToolContractMismatch 是调用时发现节点契约不属于已发布兼容集合的结构化错误详情。
+// JSON 形状属于 MCP 工具错误响应的一部分，字段调整会直接影响调用方可见的契约。
+type ToolContractMismatch struct {
 	Code          string                   `json:"code"`
 	Message       string                   `json:"message"`
 	Tool          string                   `json:"tool"`
@@ -40,7 +34,7 @@ type toolContractMismatch struct {
 	NodeVersion   string                   `json:"node_version,omitempty"`
 	PublishedHash string                   `json:"published_hash"`
 	NodeHash      string                   `json:"node_hash"`
-	Differences   []toolContractDifference `json:"differences,omitempty"`
+	Differences   []ToolContractDifference `json:"differences,omitempty"`
 }
 
 type comparableToolContract struct {
@@ -49,7 +43,9 @@ type comparableToolContract struct {
 	Meta         map[string]any `json:"_meta,omitempty"`
 }
 
-func toolContractHash(descriptor agentdock.ToolDescriptor) (string, error) {
+// ToolContractHash 计算工具描述符的语义契约哈希：只保留会影响校验结果的字段，
+// 并规范化 JSON Schema 中无顺序语义的集合。同一代公开契约的允许变体即由该哈希标记。
+func ToolContractHash(descriptor ToolDescriptor) (string, error) {
 	contract, err := comparableContract(descriptor)
 	if err != nil {
 		return "", err
@@ -62,7 +58,7 @@ func toolContractHash(descriptor agentdock.ToolDescriptor) (string, error) {
 	return fmt.Sprintf("sha256:%x", sum), nil
 }
 
-func comparableContract(descriptor agentdock.ToolDescriptor) (comparableToolContract, error) {
+func comparableContract(descriptor ToolDescriptor) (comparableToolContract, error) {
 	inputSchema, err := semanticSchemaMap(descriptor.InputSchema)
 	if err != nil {
 		return comparableToolContract{}, fmt.Errorf("规范化工具 %s 输入契约: %w", descriptor.Name, err)
@@ -192,200 +188,105 @@ func semanticSchemaKeywordValue(key string, value any) any {
 	}
 }
 
-func (s *Server) publishedNodeTool(name string) (publishedNodeTool, bool) {
-	s.mcpToolsMu.RLock()
-	defer s.mcpToolsMu.RUnlock()
-	tool, ok := s.mcpTools[name]
-	return tool, ok
-}
-
-func (s *Server) publishedNodeToolNames() []string {
-	s.mcpToolsMu.RLock()
-	defer s.mcpToolsMu.RUnlock()
-	names := make([]string, 0, len(s.mcpTools))
-	for name := range s.mcpTools {
-		names = append(names, name)
+func contractDifferences(published, node ToolDescriptor) []ToolContractDifference {
+	publishedValue, publishedOK := normalizedContractValue(published)
+	nodeValue, nodeOK := normalizedContractValue(node)
+	if !publishedOK || !nodeOK {
+		return nil
 	}
-	sort.Strings(names)
-	return names
+	differences := make([]ToolContractDifference, 0, maxToolContractDifferences)
+	collectContractDifferences("", publishedValue, nodeValue, &differences)
+	return differences
 }
 
-func (s *Server) loadPublishedNodeTools(ctx context.Context) error {
-	contracts, err := s.agentDock.ListPublishedToolContracts(ctx)
+func normalizedContractValue(descriptor ToolDescriptor) (map[string]any, bool) {
+	contract, err := comparableContract(descriptor)
 	if err != nil {
-		return err
+		return nil, false
 	}
-	for _, contract := range contracts {
-		if mcpcontract.IsCanonicalTool(contract.ToolName) {
-			// 已提升为 Nexus 中央工具的旧节点契约不再属于 fleet 发布状态，启动时直接清掉持久化残留。
-			if err := s.agentDock.DeletePublishedToolContract(ctx, contract.ToolName); err != nil {
-				return err
+	encoded, err := json.Marshal(contract)
+	if err != nil {
+		return nil, false
+	}
+	var value map[string]any
+	if json.Unmarshal(encoded, &value) != nil {
+		return nil, false
+	}
+	return value, true
+}
+
+func collectContractDifferences(path string, published, node any, differences *[]ToolContractDifference) {
+	if len(*differences) >= maxToolContractDifferences || reflect.DeepEqual(published, node) {
+		return
+	}
+	publishedMap, publishedIsMap := published.(map[string]any)
+	nodeMap, nodeIsMap := node.(map[string]any)
+	if publishedIsMap && nodeIsMap {
+		keys := unionMapKeys(publishedMap, nodeMap)
+		for _, key := range keys {
+			nextPath := key
+			if path != "" {
+				nextPath = path + "." + key
 			}
-			continue
+			publishedValue, publishedExists := publishedMap[key]
+			nodeValue, nodeExists := nodeMap[key]
+			if !publishedExists || !nodeExists {
+				*differences = append(*differences, ToolContractDifference{Path: nextPath, Published: publishedValue, Node: nodeValue})
+			} else {
+				collectContractDifferences(nextPath, publishedValue, nodeValue, differences)
+			}
+			if len(*differences) >= maxToolContractDifferences {
+				return
+			}
 		}
-		if strings.TrimSpace(contract.ToolName) == "" {
-			continue
-		}
-		hash, err := toolContractHash(contract.Descriptor)
-		if err != nil {
-			return err
-		}
-		acceptedHashes := normalizeToolContractHashes(contract.AcceptedSemanticHashes)
-		if len(acceptedHashes) == 0 {
-			// 旧版数据库没有 variant 子表数据时，至少保留原来公开 descriptor 对应的真实契约。
-			acceptedHashes = []string{hash}
-		}
-		published := publishedNodeTool{
-			Descriptor: contract.Descriptor, ContractHash: hash, AcceptedSemanticHashes: acceptedHashes,
-		}
-		s.mcpServer.AddTool(nodeMCPToolWithApps(contract.Descriptor, s.mcpAppsEnabled()), s.nodeToolHandler(contract.ToolName))
-		s.mcpTools[contract.ToolName] = published
+		return
 	}
-	return nil
+	*differences = append(*differences, ToolContractDifference{Path: path, Published: published, Node: node})
 }
 
-func (s *Server) persistPublishedNodeTool(ctx context.Context, published publishedNodeTool) error {
-	if s.agentDock == nil {
-		return nil
-	}
-	return s.agentDock.SavePublishedToolContract(ctx, agentdock.PublishedToolContract{
-		ToolName: published.Descriptor.Name, Descriptor: published.Descriptor,
-		AcceptedSemanticHashes: published.AcceptedSemanticHashes,
-	})
-}
-
-func (s *Server) reconcileFleetNodeTool(name string) error {
-	name = strings.TrimSpace(name)
-	if name == "" || mcpcontract.IsCanonicalTool(name) {
-		return nil
-	}
-	if s.agentDock == nil {
-		return nil
-	}
-	// 节点状态先落库再触发 reconcile；串行化整个快照到发布过程，避免旧快照晚于新快照覆盖 published generation。
-	s.mcpReconcileMu.Lock()
-	defer s.mcpReconcileMu.Unlock()
-
-	ctx := context.Background()
-	nodes, err := s.agentDock.List(ctx)
-	if err != nil {
-		return err
-	}
-	descriptors := make([]agentdock.ToolDescriptor, 0)
-	hasKnownProvider := false
-	for _, node := range nodes {
-		if !containsString(node.Capabilities, name) {
-			continue
-		}
-		hasKnownProvider = true
-		if !node.Enabled {
-			continue
-		}
-		nodeDescriptors, err := s.agentDock.ToolDescriptors(ctx, node.ID)
-		if err != nil {
-			return err
-		}
-		descriptor, ok := findToolDescriptor(nodeDescriptors, name)
-		if !ok {
-			return fmt.Errorf("AgentDock node %s does not provide tool descriptor %s", node.ID, name)
-		}
-		descriptors = append(descriptors, descriptor)
-	}
+// mergeFleetToolDescriptors 把多个 provider 的同名工具契约合并为 fleet 公开契约：
+// required 集合与执行级 _meta 必须一致；可选属性取并集；展示绑定只在所有 provider 一致时保留。
+// 返回的哈希集合是所有 provider 变体，用于调用时的兼容性判断。
+func mergeFleetToolDescriptors(descriptors []ToolDescriptor) (ToolDescriptor, []string, error) {
 	if len(descriptors) == 0 {
-		// 被禁用的节点仍属于 fleet；没有任何 provider 时才真正下架公开工具。
-		if hasKnownProvider {
-			return nil
-		}
-		s.mcpToolsMu.Lock()
-		defer s.mcpToolsMu.Unlock()
-		if _, exists := s.mcpTools[name]; !exists {
-			return nil
-		}
-		if err := s.agentDock.DeletePublishedToolContract(ctx, name); err != nil {
-			return err
-		}
-		if s.mcpServer != nil {
-			s.mcpServer.RemoveTools(name)
-		}
-		delete(s.mcpTools, name)
-		return nil
-	}
-
-	descriptor, acceptedHashes, err := mergeFleetToolDescriptors(descriptors)
-	if err != nil {
-		if errors.Is(err, errIncompatibleToolContract) {
-			return nil
-		}
-		return err
-	}
-	contractHash, err := toolContractHash(descriptor)
-	if err != nil {
-		return err
-	}
-	candidate := publishedNodeTool{
-		Descriptor: descriptor, ContractHash: contractHash, AcceptedSemanticHashes: acceptedHashes,
-	}
-
-	s.mcpToolsMu.Lock()
-	published, exists := s.mcpTools[name]
-	descriptorChanged := !exists || !reflect.DeepEqual(published.Descriptor, candidate.Descriptor)
-	if exists && published.ContractHash == candidate.ContractHash &&
-		reflect.DeepEqual(published.AcceptedSemanticHashes, candidate.AcceptedSemanticHashes) && !descriptorChanged {
-		s.mcpToolsMu.Unlock()
-		return nil
-	}
-	if err := s.persistPublishedNodeTool(ctx, candidate); err != nil {
-		s.mcpToolsMu.Unlock()
-		return err
-	}
-	if s.mcpServer != nil && descriptorChanged {
-		s.mcpServer.AddTool(nodeMCPToolWithApps(candidate.Descriptor, s.mcpAppsEnabled()), s.nodeToolHandler(name))
-	}
-	s.mcpTools[name] = candidate
-	s.mcpToolsMu.Unlock()
-	return nil
-}
-
-func mergeFleetToolDescriptors(descriptors []agentdock.ToolDescriptor) (agentdock.ToolDescriptor, []string, error) {
-	if len(descriptors) == 0 {
-		return agentdock.ToolDescriptor{}, nil, fmt.Errorf("%w: 没有 provider", errIncompatibleToolContract)
+		return ToolDescriptor{}, nil, fmt.Errorf("%w: 没有 provider", errIncompatibleToolContract)
 	}
 	merged, err := cloneToolDescriptor(descriptors[0])
 	if err != nil {
-		return agentdock.ToolDescriptor{}, nil, err
+		return ToolDescriptor{}, nil, err
 	}
 	acceptedHashes := make([]string, 0, len(descriptors))
 	for _, descriptor := range descriptors {
 		if descriptor.Name != merged.Name {
-			return agentdock.ToolDescriptor{}, nil, fmt.Errorf("%w: tool name %q != %q", errIncompatibleToolContract, descriptor.Name, merged.Name)
+			return ToolDescriptor{}, nil, fmt.Errorf("%w: tool name %q != %q", errIncompatibleToolContract, descriptor.Name, merged.Name)
 		}
-		hash, err := toolContractHash(descriptor)
+		hash, err := ToolContractHash(descriptor)
 		if err != nil {
-			return agentdock.ToolDescriptor{}, nil, err
+			return ToolDescriptor{}, nil, err
 		}
 		acceptedHashes = append(acceptedHashes, hash)
 	}
 	for _, descriptor := range descriptors[1:] {
 		if !jsonValuesEqual(executionToolMeta(merged.Meta), executionToolMeta(descriptor.Meta)) {
-			return agentdock.ToolDescriptor{}, nil, fmt.Errorf("%w: %s execution meta", errIncompatibleToolContract, merged.Name)
+			return ToolDescriptor{}, nil, fmt.Errorf("%w: %s execution meta", errIncompatibleToolContract, merged.Name)
 		}
 		merged.InputSchema, err = mergeSchemaMaps("inputSchema", merged.InputSchema, descriptor.InputSchema)
 		if err != nil {
-			return agentdock.ToolDescriptor{}, nil, err
+			return ToolDescriptor{}, nil, err
 		}
 		merged.OutputSchema, err = mergeSchemaMaps("outputSchema", merged.OutputSchema, descriptor.OutputSchema)
 		if err != nil {
-			return agentdock.ToolDescriptor{}, nil, err
+			return ToolDescriptor{}, nil, err
 		}
 	}
 	// _meta.ui 是展示绑定，不属于节点 resource provider 能力；只有所有 provider 展示元数据一致时才保留。
 	// resource.read provider 由 Hello.ui_resources 独立决定，安全提示仍按 MCP 默认语义保守合并。
 	merged.Meta = mergeFleetToolMeta(descriptors)
 	merged.Annotations = mergeFleetToolAnnotations(descriptors)
-	return merged, normalizeToolContractHashes(acceptedHashes), nil
+	return merged, normalizeSemanticHashes(acceptedHashes), nil
 }
 
-func mergeFleetToolMeta(descriptors []agentdock.ToolDescriptor) map[string]any {
+func mergeFleetToolMeta(descriptors []ToolDescriptor) map[string]any {
 	if len(descriptors) == 0 || len(descriptors[0].Meta) == 0 {
 		return nil
 	}
@@ -407,7 +308,7 @@ func mergeFleetToolMeta(descriptors []agentdock.ToolDescriptor) map[string]any {
 	return common
 }
 
-func mergeFleetToolAnnotations(descriptors []agentdock.ToolDescriptor) map[string]any {
+func mergeFleetToolAnnotations(descriptors []ToolDescriptor) map[string]any {
 	hasAnnotations := false
 	for _, descriptor := range descriptors {
 		if len(descriptor.Annotations) > 0 {
@@ -444,7 +345,7 @@ func mergeFleetToolAnnotations(descriptors []agentdock.ToolDescriptor) map[strin
 	return merged
 }
 
-func mergeFleetToolAnnotationCommonValues(descriptors []agentdock.ToolDescriptor) map[string]any {
+func mergeFleetToolAnnotationCommonValues(descriptors []ToolDescriptor) map[string]any {
 	if len(descriptors) == 0 || len(descriptors[0].Annotations) == 0 {
 		return nil
 	}
@@ -478,14 +379,14 @@ func annotationBool(annotations map[string]any, key string, defaultValue bool) b
 	return parsed
 }
 
-func cloneToolDescriptor(descriptor agentdock.ToolDescriptor) (agentdock.ToolDescriptor, error) {
+func cloneToolDescriptor(descriptor ToolDescriptor) (ToolDescriptor, error) {
 	encoded, err := json.Marshal(descriptor)
 	if err != nil {
-		return agentdock.ToolDescriptor{}, fmt.Errorf("复制工具 %s 契约: %w", descriptor.Name, err)
+		return ToolDescriptor{}, fmt.Errorf("复制工具 %s 契约: %w", descriptor.Name, err)
 	}
-	var cloned agentdock.ToolDescriptor
+	var cloned ToolDescriptor
 	if err := json.Unmarshal(encoded, &cloned); err != nil {
-		return agentdock.ToolDescriptor{}, fmt.Errorf("复制工具 %s 契约: %w", descriptor.Name, err)
+		return ToolDescriptor{}, fmt.Errorf("复制工具 %s 契约: %w", descriptor.Name, err)
 	}
 	return cloned, nil
 }
@@ -671,48 +572,12 @@ func unionMapKeys(left, right map[string]any) []string {
 	return ordered
 }
 
-func normalizeToolContractHashes(hashes []string) []string {
-	unique := make(map[string]struct{}, len(hashes))
-	for _, hash := range hashes {
-		hash = strings.TrimSpace(hash)
-		if hash != "" {
-			unique[hash] = struct{}{}
-		}
-	}
-	normalized := make([]string, 0, len(unique))
-	for hash := range unique {
-		normalized = append(normalized, hash)
-	}
-	sort.Strings(normalized)
-	return normalized
-}
-
 func containsToolContractHash(hashes []string, target string) bool {
 	index := sort.SearchStrings(hashes, target)
 	return index < len(hashes) && hashes[index] == target
 }
 
-func (s *Server) reconcileNodeToolContracts(names []string) {
-	defer s.syncMCPAppResources()
-	seen := make(map[string]struct{}, len(names))
-	for _, name := range names {
-		name = strings.TrimSpace(name)
-		// 节点启停或删除后的 fleet 重算也会收到完整 descriptor 名单；中央工具始终由
-		// Nexus 唯一持有，不能在这条旁路中被重新发布为要求 node_id 的节点工具。
-		if name == "" || mcpcontract.IsCanonicalTool(name) {
-			continue
-		}
-		if _, ok := seen[name]; ok {
-			continue
-		}
-		seen[name] = struct{}{}
-		if err := s.reconcileFleetNodeTool(name); err != nil && s.logger != nil {
-			s.logger.Warn("检查 AgentDock 工具契约收敛失败", "tool", name, "error", err)
-		}
-	}
-}
-
-func toolDescriptorNames(descriptors []agentdock.ToolDescriptor) []string {
+func toolDescriptorNames(descriptors []ToolDescriptor) []string {
 	names := make([]string, 0, len(descriptors))
 	for _, descriptor := range descriptors {
 		if name := strings.TrimSpace(descriptor.Name); name != "" {
@@ -722,101 +587,11 @@ func toolDescriptorNames(descriptors []agentdock.ToolDescriptor) []string {
 	return names
 }
 
-func findToolDescriptor(descriptors []agentdock.ToolDescriptor, name string) (agentdock.ToolDescriptor, bool) {
+func findToolDescriptor(descriptors []ToolDescriptor, name string) (ToolDescriptor, bool) {
 	for _, descriptor := range descriptors {
 		if descriptor.Name == name {
 			return descriptor, true
 		}
 	}
-	return agentdock.ToolDescriptor{}, false
-}
-
-func (s *Server) nodeToolContractMismatch(ctx context.Context, node agentdock.Node, name string) (*toolContractMismatch, error) {
-	published, ok := s.publishedNodeTool(name)
-	if !ok {
-		return nil, fmt.Errorf("Nexus 公开工具契约不存在: %s", name)
-	}
-	descriptors, err := s.agentDock.ToolDescriptors(ctx, node.ID)
-	if err != nil {
-		return nil, err
-	}
-	target, ok := findToolDescriptor(descriptors, name)
-	if !ok {
-		return nil, fmt.Errorf("AgentDock node %s does not provide tool descriptor %s", node.ID, name)
-	}
-	nodeHash, err := toolContractHash(target)
-	if err != nil {
-		return nil, err
-	}
-	if containsToolContractHash(published.AcceptedSemanticHashes, nodeHash) {
-		return nil, nil
-	}
-
-	return &toolContractMismatch{
-		Code:          "TOOL_CONTRACT_MISMATCH",
-		Message:       "目标 AgentDock 的工具契约不在 Nexus 当前已发布的兼容集合中，请刷新 GPT 工具；若仍不一致，请检查相关设备的 AgentDock 版本或工具契约。",
-		Tool:          name,
-		NodeID:        node.ID,
-		NodeName:      node.Name,
-		NodeVersion:   node.Version,
-		PublishedHash: published.ContractHash,
-		NodeHash:      nodeHash,
-		Differences:   toolContractDifferences(published.Descriptor, target),
-	}, nil
-}
-
-func toolContractDifferences(published, node agentdock.ToolDescriptor) []toolContractDifference {
-	publishedValue, publishedOK := normalizedContractValue(published)
-	nodeValue, nodeOK := normalizedContractValue(node)
-	if !publishedOK || !nodeOK {
-		return nil
-	}
-	differences := make([]toolContractDifference, 0, maxToolContractDifferences)
-	collectToolContractDifferences("", publishedValue, nodeValue, &differences)
-	return differences
-}
-
-func normalizedContractValue(descriptor agentdock.ToolDescriptor) (map[string]any, bool) {
-	contract, err := comparableContract(descriptor)
-	if err != nil {
-		return nil, false
-	}
-	encoded, err := json.Marshal(contract)
-	if err != nil {
-		return nil, false
-	}
-	var value map[string]any
-	if json.Unmarshal(encoded, &value) != nil {
-		return nil, false
-	}
-	return value, true
-}
-
-func collectToolContractDifferences(path string, published, node any, differences *[]toolContractDifference) {
-	if len(*differences) >= maxToolContractDifferences || reflect.DeepEqual(published, node) {
-		return
-	}
-	publishedMap, publishedIsMap := published.(map[string]any)
-	nodeMap, nodeIsMap := node.(map[string]any)
-	if publishedIsMap && nodeIsMap {
-		keys := unionMapKeys(publishedMap, nodeMap)
-		for _, key := range keys {
-			nextPath := key
-			if path != "" {
-				nextPath = path + "." + key
-			}
-			publishedValue, publishedExists := publishedMap[key]
-			nodeValue, nodeExists := nodeMap[key]
-			if !publishedExists || !nodeExists {
-				*differences = append(*differences, toolContractDifference{Path: nextPath, Published: publishedValue, Node: nodeValue})
-			} else {
-				collectToolContractDifferences(nextPath, publishedValue, nodeValue, differences)
-			}
-			if len(*differences) >= maxToolContractDifferences {
-				return
-			}
-		}
-		return
-	}
-	*differences = append(*differences, toolContractDifference{Path: path, Published: published, Node: node})
+	return ToolDescriptor{}, false
 }

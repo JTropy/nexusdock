@@ -1,4 +1,4 @@
-package httpx
+package agentdock
 
 import (
 	"errors"
@@ -6,11 +6,10 @@ import (
 	"testing"
 
 	protocol "github.com/uvwt/agentdock-protocol"
-	"github.com/uvwt/nexusdock/internal/agentdock"
 )
 
 func TestToolContractHashIgnoresSchemaPresentationOnly(t *testing.T) {
-	left := agentdock.ToolDescriptor{
+	left := ToolDescriptor{
 		Name: "exec_command",
 		InputSchema: map[string]any{
 			"type": "object",
@@ -30,11 +29,11 @@ func TestToolContractHashIgnoresSchemaPresentationOnly(t *testing.T) {
 	right.InputSchema["required"] = []any{"description", "mode"}
 	right.InputSchema["properties"].(map[string]any)["mode"].(map[string]any)["enum"] = []any{"wsl", "host"}
 
-	leftHash, err := toolContractHash(left)
+	leftHash, err := ToolContractHash(left)
 	if err != nil {
 		t.Fatal(err)
 	}
-	rightHash, err := toolContractHash(right)
+	rightHash, err := ToolContractHash(right)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +46,7 @@ func TestToolContractHashIgnoresSchemaPresentationOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	delete(withoutRealDescriptionParameter.InputSchema["properties"].(map[string]any), "description")
-	removedHash, err := toolContractHash(withoutRealDescriptionParameter)
+	removedHash, err := ToolContractHash(withoutRealDescriptionParameter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,11 +68,11 @@ func TestToolContractHashIgnoresToolPresentationMetadata(t *testing.T) {
 		"readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false,
 	}
 
-	baseHash, err := toolContractHash(base)
+	baseHash, err := ToolContractHash(base)
 	if err != nil {
 		t.Fatal(err)
 	}
-	presentedHash, err := toolContractHash(presented)
+	presentedHash, err := ToolContractHash(presented)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +85,7 @@ func TestToolContractHashIgnoresToolPresentationMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	withExecutionMeta.Meta["file_arg_rewrite_paths"] = []any{"path"}
-	executionMetaHash, err := toolContractHash(withExecutionMeta)
+	executionMetaHash, err := ToolContractHash(withExecutionMeta)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +112,7 @@ func TestMergeFleetToolDescriptorsMergesPresentationConservatively(t *testing.T)
 		"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false,
 	}
 
-	merged, accepted, err := mergeFleetToolDescriptors([]agentdock.ToolDescriptor{old, newDescriptor})
+	merged, accepted, err := mergeFleetToolDescriptors([]ToolDescriptor{old, newDescriptor})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +140,7 @@ func TestMergeFleetToolDescriptorsMergesPresentationConservatively(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	converged, _, err := mergeFleetToolDescriptors([]agentdock.ToolDescriptor{updatedOld, updatedNew})
+	converged, _, err := mergeFleetToolDescriptors([]ToolDescriptor{updatedOld, updatedNew})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +162,7 @@ func TestMergeFleetToolDescriptorsMergesPresentationConservatively(t *testing.T)
 	}
 	secondPresentation.Meta["ui"] = map[string]any{"resourceUri": protocol.TaskProgressUIResourceURI}
 
-	mixedPresentation, _, err := mergeFleetToolDescriptors([]agentdock.ToolDescriptor{firstPresentation, secondPresentation})
+	mixedPresentation, _, err := mergeFleetToolDescriptors([]ToolDescriptor{firstPresentation, secondPresentation})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,8 +175,8 @@ func TestMergeFleetToolDescriptorsMergesPresentationConservatively(t *testing.T)
 func TestMergeFleetToolDescriptorsSupportsPlatformOptionalProperties(t *testing.T) {
 	tests := []struct {
 		name string
-		mac  agentdock.ToolDescriptor
-		win  agentdock.ToolDescriptor
+		mac  ToolDescriptor
+		win  ToolDescriptor
 		want []string
 	}{
 		{
@@ -233,7 +232,7 @@ func TestMergeFleetToolDescriptorsSupportsPlatformOptionalProperties(t *testing.
 				"additionalProperties": false,
 			}
 
-			merged, accepted, err := mergeFleetToolDescriptors([]agentdock.ToolDescriptor{mac, win})
+			merged, accepted, err := mergeFleetToolDescriptors([]ToolDescriptor{mac, win})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -287,7 +286,7 @@ func TestMergeFleetToolDescriptorsRejectsValidationDrift(t *testing.T) {
 			} else {
 				tt.mutate(other.InputSchema["properties"].(map[string]any))
 			}
-			_, _, err = mergeFleetToolDescriptors([]agentdock.ToolDescriptor{base, other})
+			_, _, err = mergeFleetToolDescriptors([]ToolDescriptor{base, other})
 			if !errors.Is(err, errIncompatibleToolContract) {
 				t.Fatalf("error = %v, want incompatible contract", err)
 			}
@@ -299,7 +298,7 @@ func TestMergeFleetToolDescriptorsRejectsValidationDrift(t *testing.T) {
 		t.Fatal(err)
 	}
 	requiredDrift.InputSchema["required"] = []any{"command", "mode"}
-	if _, _, err := mergeFleetToolDescriptors([]agentdock.ToolDescriptor{base, requiredDrift}); !errors.Is(err, errIncompatibleToolContract) {
+	if _, _, err := mergeFleetToolDescriptors([]ToolDescriptor{base, requiredDrift}); !errors.Is(err, errIncompatibleToolContract) {
 		t.Fatalf("required drift error = %v", err)
 	}
 
@@ -309,13 +308,13 @@ func TestMergeFleetToolDescriptorsRejectsValidationDrift(t *testing.T) {
 	}
 	providerOnlyRequired.InputSchema["properties"].(map[string]any)["runtime"] = map[string]any{"type": "string"}
 	providerOnlyRequired.InputSchema["required"] = []any{"command", "runtime"}
-	if _, _, err := mergeFleetToolDescriptors([]agentdock.ToolDescriptor{base, providerOnlyRequired}); !errors.Is(err, errIncompatibleToolContract) {
+	if _, _, err := mergeFleetToolDescriptors([]ToolDescriptor{base, providerOnlyRequired}); !errors.Is(err, errIncompatibleToolContract) {
 		t.Fatalf("provider-only required property error = %v", err)
 	}
 }
 
-func platformContractDescriptor(name string, properties map[string]any, required []any) agentdock.ToolDescriptor {
-	return agentdock.ToolDescriptor{
+func platformContractDescriptor(name string, properties map[string]any, required []any) ToolDescriptor {
+	return ToolDescriptor{
 		Name: name,
 		InputSchema: map[string]any{
 			"type":                 "object",

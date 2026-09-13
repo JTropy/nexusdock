@@ -158,7 +158,7 @@ func TestMCPAppsToggleRemovesRelayButKeepsPersistedCapabilities(t *testing.T) {
 	sdk := mcpsdk.NewServer(&mcpsdk.Implementation{Name: "toggle-test", Version: "1"}, nil)
 	server := &Server{
 		mcpAppsEnabledState: true, agentDock: store, mcpServer: sdk,
-		mcpTools: make(map[string]publishedNodeTool), mcpResources: make(map[string]struct{}),
+		mcpResources: make(map[string]struct{}),
 	}
 	server.syncMCPAppResources()
 	if _, ok := server.mcpResources[capability.URI]; !ok {
