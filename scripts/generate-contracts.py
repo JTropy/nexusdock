@@ -200,12 +200,14 @@ def build_schemas() -> dict[str, dict[str, Any]]:
         {
             "ok": scalar("boolean", "系统是否健康。"),
             "service": scalar("string", "服务名称，固定为 nexusdock。"),
+            "version": scalar("string", "NexusDock 构建版本（git describe），未注入的本地构建为 dev。"),
+            "revision": scalar("string", "NexusDock 构建修订（git 提交号），未注入的本地构建为 unknown。"),
             "database": scalar("string", "SQLite 健康状态。"),
             "schema_version": scalar("integer", "数据库 Schema 版本。", minimum=0),
             "nexus_data_dir": scalar("string", "Nexus 系统状态目录。"),
             "recall_repo_dir": scalar("string", "Recall Markdown 数据目录。"),
         },
-        ("ok", "service", "database", "schema_version", "nexus_data_dir", "recall_repo_dir"),
+        ("ok", "service", "version", "revision", "database", "schema_version", "nexus_data_dir", "recall_repo_dir"),
     )
     schemas["RecallEntry"] = obj(
         "Markdown 召回条目。",

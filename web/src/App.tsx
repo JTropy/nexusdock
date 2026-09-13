@@ -34,6 +34,8 @@ type Tone = 'ok' | 'warn' | 'danger' | 'info' | 'muted';
 type SystemStatus = {
   ok: boolean;
   service: string;
+  version?: string;
+  revision?: string;
   database: string;
   schema_version: number;
   nexus_data_dir?: string;
@@ -293,7 +295,7 @@ function useRuntimeNodeMetrics(runtimeNodes: RuntimeNodesState, refreshToken: nu
 
 function HomePage({ refreshToken, runtimeNodes, navigate }: { refreshToken: number; runtimeNodes: RuntimeNodesState; navigate: (section: Section) => void }) {
   const { t } = useTranslation();
-  const system = useResource<SystemStatus>('/v1/system/status', { ok: false, service: 'nexusdock', database: 'unknown', schema_version: 0, nexus_data_dir: '', recall_repo_dir: '' }, refreshToken);
+  const system = useResource<SystemStatus>('/v1/system/status', { ok: false, service: 'nexusdock', version: 'dev', revision: 'unknown', database: 'unknown', schema_version: 0, nexus_data_dir: '', recall_repo_dir: '' }, refreshToken);
   const runtimeMetrics = useRuntimeNodeMetrics(runtimeNodes, refreshToken);
   const enabledNodes = runtimeNodes.nodes.filter((node) => node.enabled);
   const onlineNodes = enabledNodes.filter((node) => node.online);
@@ -429,7 +431,7 @@ function SettingsPage({ refreshToken, runtimeNodes }: { refreshToken: number; ru
 
 function SystemSettingsPage({ refreshToken, runtimeNodes }: { refreshToken: number; runtimeNodes: RuntimeNodesState }) {
   const { t } = useTranslation();
-  const system = useResource<SystemStatus>('/v1/system/status', { ok: false, service: 'nexusdock', database: 'unknown', schema_version: 0, nexus_data_dir: '', recall_repo_dir: '' }, refreshToken);
+  const system = useResource<SystemStatus>('/v1/system/status', { ok: false, service: 'nexusdock', version: 'dev', revision: 'unknown', database: 'unknown', schema_version: 0, nexus_data_dir: '', recall_repo_dir: '' }, refreshToken);
 
   return <section className="system-settings-page">
     <AgentDockNodesPanel
@@ -444,7 +446,7 @@ function SystemSettingsPage({ refreshToken, runtimeNodes }: { refreshToken: numb
       <Panel icon={Activity} title={t('System')} subtitle={t('Runtime status and data locations')}>
         <SettingValue label={t('Service')} value={system.data.service || 'nexusdock'} tone={system.data.ok ? 'ok' : 'danger'} />
         <SettingValue label={t('Database')} value={system.data.database || 'unknown'} tone={system.data.database === 'ok' ? 'ok' : 'danger'} />
-        <details className="nexus-technical-details"><summary>{t('Data & version')}</summary><SettingValue label="Schema" value={String(system.data.schema_version || 0)} /><SettingValue label={t('Nexus data')} value={system.data.nexus_data_dir || t('None')} mono /><SettingValue label={t('Recall repository')} value={system.data.recall_repo_dir || t('None')} mono /></details>
+        <details className="nexus-technical-details"><summary>{t('Data & version')}</summary><SettingValue label={t('Version')} value={system.data.version || 'dev'} mono /><SettingValue label={t('Revision')} value={system.data.revision || 'unknown'} mono /><SettingValue label="Schema" value={String(system.data.schema_version || 0)} /><SettingValue label={t('Nexus data')} value={system.data.nexus_data_dir || t('None')} mono /><SettingValue label={t('Recall repository')} value={system.data.recall_repo_dir || t('None')} mono /></details>
       </Panel>
     </section>
   </section>;

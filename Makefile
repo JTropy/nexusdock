@@ -1,5 +1,13 @@
 GO_SOURCES := $(shell find cmd internal tests -type f -name '*.go' -print | sort)
 WEB_INSTALL_STAMP := web/node_modules/.install-stamp
+# 构建期版本信息：version 取 git describe（无标签时回退提交号），revision 取完整提交号。
+# 不在 git 仓库内构建时回退 dev/unknown，与 internal/buildinfo 的缺省值保持一致。
+BUILD_VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+BUILD_REVISION := $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
+BUILD_SOURCE := unknown
+BUILD_LDFLAGS := -X github.com/uvwt/nexusdock/internal/buildinfo.Version=$(BUILD_VERSION) \
+	-X github.com/uvwt/nexusdock/internal/buildinfo.Revision=$(BUILD_REVISION) \
+	-X github.com/uvwt/nexusdock/internal/buildinfo.Source=$(BUILD_SOURCE)
 
 .PHONY: fmt fmt-check test test-race vet tidy-check contracts repository-check web-deps web-build build build-nexusdock check ci run run-nexusdock clean
 
@@ -48,7 +56,7 @@ build: web-build check build-nexusdock
 
 build-nexusdock:
 	mkdir -p bin
-	go build -trimpath -o bin/nexusdock ./cmd/nexusdock
+	go build -trimpath -ldflags '$(BUILD_LDFLAGS)' -o bin/nexusdock ./cmd/nexusdock
 
 run: run-nexusdock
 
