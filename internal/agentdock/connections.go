@@ -30,12 +30,14 @@ type pendingResult struct {
 }
 
 type nodeConnection struct {
-	nodeID  string
-	socket  *websocket.Conn
-	writeMu sync.Mutex
-	mu      sync.Mutex
-	pending map[string]chan pendingResult
-	closed  bool
+	nodeID    string
+	socket    *websocket.Conn
+	writeMu   sync.Mutex
+	mu        sync.Mutex
+	pending   map[string]chan pendingResult
+	closed    bool
+	ready     chan struct{}
+	readyOnce sync.Once
 }
 
 type Hub struct {
@@ -57,9 +59,9 @@ func NewHub(store *Store) *Hub {
 
 func (h *Hub) Online(nodeID string) bool {
 	h.mu.RLock()
-	defer h.mu.RUnlock()
-	_, ok := h.nodes[nodeID]
-	return ok
+	connection := h.nodes[nodeID]
+	h.mu.RUnlock()
+	return connection != nil && connection.isReady()
 }
 
 func (h *Hub) Disconnect(nodeID string) {
@@ -94,7 +96,9 @@ func (h *Hub) Accept(w http.ResponseWriter, r *http.Request, nodeID string) erro
 	}
 	socket.SetReadLimit(maxConnectionMessageBytes)
 	_ = socket.SetReadDeadline(time.Now().Add(15 * time.Second))
-	connection := &nodeConnection{nodeID: nodeID, socket: socket, pending: make(map[string]chan pendingResult)}
+	connection := &nodeConnection{
+		nodeID: nodeID, socket: socket, pending: make(map[string]chan pendingResult), ready: make(chan struct{}),
+	}
 
 	var first connectionMessage
 	if err := socket.ReadJSON(&first); err != nil {
@@ -110,19 +114,31 @@ func (h *Hub) Accept(w http.ResponseWriter, r *http.Request, nodeID string) erro
 		connection.close(err)
 		return err
 	}
-	if err := connection.write(connectionMessage{
-		Type: protocol.MessageNodeReady, ProtocolVersion: ConnectionProtocolVersion, HeartbeatMS: int(heartbeatInterval / time.Millisecond),
-	}); err != nil {
-		connection.close(err)
-		return fmt.Errorf("确认 AgentDock 握手: %w", err)
-	}
-	_ = socket.SetReadDeadline(time.Now().Add(2 * heartbeatInterval))
-
+	// 先登记连接，再发送 node.ready；Invoke 会等待 connection.ready，保证客户端一旦收到
+	// ready 后立即发起 Runtime 请求时，不会撞上“ready 已到达但 Hub 尚未登记”的竞态。
 	h.mu.Lock()
 	previous := h.nodes[nodeID]
 	h.nodes[nodeID] = connection
 	onHello := h.onHello
 	h.mu.Unlock()
+	if err := connection.write(connectionMessage{
+		Type: protocol.MessageNodeReady, ProtocolVersion: ConnectionProtocolVersion, HeartbeatMS: int(heartbeatInterval / time.Millisecond),
+	}); err != nil {
+		h.mu.Lock()
+		if h.nodes[nodeID] == connection {
+			if previous != nil {
+				h.nodes[nodeID] = previous
+			} else {
+				delete(h.nodes, nodeID)
+			}
+		}
+		h.mu.Unlock()
+		connection.close(err)
+		return fmt.Errorf("确认 AgentDock 握手: %w", err)
+	}
+	connection.markReady()
+	_ = socket.SetReadDeadline(time.Now().Add(2 * heartbeatInterval))
+
 	if previous != nil {
 		previous.close(errors.New("AgentDock 节点建立了新连接"))
 	}
@@ -143,6 +159,9 @@ func (h *Hub) Invoke(ctx context.Context, nodeID, operation string, arguments an
 	}
 	if operation == "" {
 		return nil, errors.New("节点操作不能为空")
+	}
+	if err := connection.waitReady(ctx); err != nil {
+		return nil, err
 	}
 	encoded, err := json.Marshal(arguments)
 	if err != nil {
@@ -208,6 +227,28 @@ func (h *Hub) readLoop(connection *nodeConnection) {
 	}
 }
 
+func (c *nodeConnection) markReady() {
+	c.readyOnce.Do(func() { close(c.ready) })
+}
+
+func (c *nodeConnection) isReady() bool {
+	select {
+	case <-c.ready:
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *nodeConnection) waitReady(ctx context.Context) error {
+	select {
+	case <-c.ready:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (c *nodeConnection) write(message connectionMessage) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
@@ -257,6 +298,7 @@ func (c *nodeConnection) close(reason error) {
 	pending := c.pending
 	c.pending = make(map[string]chan pendingResult)
 	c.mu.Unlock()
+	c.markReady()
 	_ = c.socket.Close()
 	for _, channel := range pending {
 		channel <- pendingResult{err: reason}
