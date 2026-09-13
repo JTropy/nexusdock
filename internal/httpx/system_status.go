@@ -2,6 +2,8 @@ package httpx
 
 import (
 	"net/http"
+
+	"github.com/uvwt/nexusdock/internal/buildinfo"
 )
 
 func (s *Server) systemStatus(w http.ResponseWriter, r *http.Request) {
@@ -9,6 +11,8 @@ func (s *Server) systemStatus(w http.ResponseWriter, r *http.Request) {
 	status := map[string]any{
 		"ok":              true,
 		"service":         "nexusdock",
+		"version":         buildinfo.Version,
+		"revision":        buildinfo.Revision,
 		"database":        "unavailable",
 		"schema_version":  0,
 		"nexus_data_dir":  s.cfg.NexusDataDir,

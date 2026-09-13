@@ -1,6 +1,12 @@
 services:
   nexusdock:
-    build: .
+    build:
+      context: .
+      # 与 Dockerfile 的 ARG 缺省一致；发布构建可通过宿主环境变量注入版本信息。
+      args:
+        NEXUS_VERSION: ${NEXUS_VERSION:-dev}
+        NEXUS_REVISION: ${NEXUS_REVISION:-unknown}
+        NEXUS_SOURCE: ${NEXUS_SOURCE:-unknown}
     image: nexusdock:local
     container_name: nexusdock
     restart: unless-stopped

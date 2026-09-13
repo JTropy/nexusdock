@@ -12,7 +12,14 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 COPY --from=web-builder /src/internal/httpx/web_dist ./internal/httpx/web_dist
-RUN go build -o /out/nexusdock ./cmd/nexusdock
+# 构建参数缺省值与 internal/buildinfo 的缺省值一致，本地直接 docker build 不受影响；
+# CI 或发布流程注入这三个参数后，镜像内二进制与 OCI labels 保持同一版本信息。
+ARG NEXUS_VERSION=dev
+ARG NEXUS_REVISION=unknown
+ARG NEXUS_SOURCE=unknown
+RUN go build -trimpath \
+    -ldflags "-X github.com/uvwt/nexusdock/internal/buildinfo.Version=${NEXUS_VERSION} -X github.com/uvwt/nexusdock/internal/buildinfo.Revision=${NEXUS_REVISION} -X github.com/uvwt/nexusdock/internal/buildinfo.Source=${NEXUS_SOURCE}" \
+    -o /out/nexusdock ./cmd/nexusdock
 
 FROM alpine:3.20
 RUN apk add --no-cache git ca-certificates \
@@ -29,6 +36,13 @@ ENV NEXUS_HOST=0.0.0.0 \
     HOME=/tmp
 EXPOSE 18777
 VOLUME ["/var/lib/nexus", "/recall"]
+# OCI 标准镜像标签：ARG 在每个 stage 独立作用域，最终阶段需要重新声明才能用于 LABEL。
+ARG NEXUS_VERSION=dev
+ARG NEXUS_REVISION=unknown
+ARG NEXUS_SOURCE=unknown
+LABEL org.opencontainers.image.version=${NEXUS_VERSION} \
+      org.opencontainers.image.revision=${NEXUS_REVISION} \
+      org.opencontainers.image.source=${NEXUS_SOURCE}
 USER 10001:10001
 # HEALTHCHECK 打 /ready（readiness）：控制库可查询且 Recall 根目录可访问才算健康；
 # /health 保持为极轻量 liveness，不做依赖检查，不能反映数据面是否可用。
