@@ -30,5 +30,7 @@ ENV NEXUS_HOST=0.0.0.0 \
 EXPOSE 18777
 VOLUME ["/var/lib/nexus", "/recall"]
 USER 10001:10001
-HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 CMD wget -q -T 2 -O /dev/null http://127.0.0.1:18777/health || exit 1
+# HEALTHCHECK 打 /ready（readiness）：控制库可查询且 Recall 根目录可访问才算健康；
+# /health 保持为极轻量 liveness，不做依赖检查，不能反映数据面是否可用。
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 CMD wget -q -T 2 -O /dev/null http://127.0.0.1:18777/ready || exit 1
 ENTRYPOINT ["nexusdock"]

@@ -32,7 +32,12 @@ func Main(args []string) int {
 }
 
 func run(args []string) error {
-	cfg := config.FromEnv()
+	// 配置加载本身 fail-fast：任何启动变量非法都会在这里终止进程，
+	// admin 等本地命令也复用同一份加载结果，保证行为一致。
+	cfg, err := config.LoadFromEnv()
+	if err != nil {
+		return fmt.Errorf("load startup configuration: %w", err)
+	}
 	if adminCommandRequested(args) {
 		return runAdminCommand(context.Background(), cfg, args)
 	}
@@ -69,6 +74,15 @@ func run(args []string) error {
 	defer controlDB.Close()
 	if err := core.EnsureSchema(ctx, controlDB); err != nil {
 		return fmt.Errorf("ensure control plane schema: %w", err)
+	}
+	// 启动阶段在 Schema 就绪后对控制库做一次完整 quick_check，尽早暴露磁盘或文件级损坏；
+	// 运行期探针（/ready）只做轻量 SELECT 1，全库扫描不进入周期任务，避免常态负载。
+	var integrity string
+	if err := controlDB.QueryRowContext(ctx, `PRAGMA quick_check`).Scan(&integrity); err != nil {
+		return fmt.Errorf("control plane database quick_check: %w", err)
+	}
+	if integrity != "ok" {
+		return fmt.Errorf("control plane database quick_check reported %q", integrity)
 	}
 	runtimeSettings, err := settings.NewStore(controlDB, controlDir)
 	if err != nil {

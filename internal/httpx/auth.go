@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -349,21 +350,28 @@ func (s *Server) isTrustedProxyIP(ip net.IP) bool {
 	if ip == nil {
 		return false
 	}
-	s.mu.RLock()
-	trusted := append([]string(nil), s.cfg.TrustedProxies...)
-	s.mu.RUnlock()
-	for _, entry := range trusted {
-		if _, prefix, err := net.ParseCIDR(entry); err == nil {
-			if prefix.Contains(ip) {
-				return true
-			}
-			continue
-		}
-		if candidate := net.ParseIP(strings.Trim(entry, "[]")); candidate != nil && candidate.Equal(ip) {
+	addr, ok := netipAddr(ip)
+	if !ok {
+		return false
+	}
+	// cfg.TrustedProxies 在启动时已解析为规范化前缀，这里只做地址族一致的包含判断。
+	for _, prefix := range s.cfg.TrustedProxies {
+		if prefix.Contains(addr) {
 			return true
 		}
 	}
 	return false
+}
+
+// netipAddr 把请求侧的 net.IP 转换成 netip.Addr 并还原 IPv4-mapped 形式，
+// 使其能与配置侧规范化后的 netip.Prefix 直接比对；XFF 与 RemoteAddr 里
+// 的 IPv4 常以 ::ffff:a.b.c.d 的 16 字节形式出现，不还原会导致族不匹配。
+func netipAddr(ip net.IP) (netip.Addr, bool) {
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return netip.Addr{}, false
+	}
+	return addr.Unmap(), true
 }
 
 func (s *Server) clientIPPrefix(r *http.Request) string {

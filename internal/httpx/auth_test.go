@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"testing"
 
@@ -13,6 +14,21 @@ import (
 	"github.com/uvwt/nexusdock/internal/config"
 	"github.com/uvwt/nexusdock/internal/core"
 )
+
+// trustedPrefixes 在测试中按与 LoadFromEnv 相同的规则解析可信代理配置，
+// 保证测试构造的 Config 与生产启动路径的规范化形式一致。
+func trustedPrefixes(t *testing.T, entries ...string) []netip.Prefix {
+	t.Helper()
+	prefixes := make([]netip.Prefix, 0, len(entries))
+	for _, entry := range entries {
+		prefix, err := config.ParseTrustedProxy(entry)
+		if err != nil {
+			t.Fatalf("parse trusted proxy %q: %v", entry, err)
+		}
+		prefixes = append(prefixes, prefix)
+	}
+	return prefixes
+}
 
 func TestSafeReturnToRejectsExternalAndControlValues(t *testing.T) {
 	cases := []struct {
@@ -37,7 +53,7 @@ func TestSafeReturnToRejectsExternalAndControlValues(t *testing.T) {
 }
 
 func TestSameOriginHonorsTrustedProxyHeadersOnly(t *testing.T) {
-	server := &Server{cfg: config.Config{TrustedProxies: []string{"10.0.0.0/8"}}}
+	server := &Server{cfg: config.Config{TrustedProxies: trustedPrefixes(t, "10.0.0.0/8")}}
 
 	directTLS := httptest.NewRequest(http.MethodPost, "https://nexus.example/v1/auth/login", nil)
 	directTLS.Header.Set("Origin", "https://nexus.example")
@@ -66,7 +82,7 @@ func TestSameOriginHonorsTrustedProxyHeadersOnly(t *testing.T) {
 }
 
 func TestSecureRequestRequiresTLSOrTrustedForwardedProto(t *testing.T) {
-	server := &Server{cfg: config.Config{TrustedProxies: []string{"10.0.0.0/8"}}}
+	server := &Server{cfg: config.Config{TrustedProxies: trustedPrefixes(t, "10.0.0.0/8")}}
 
 	directTLS := httptest.NewRequest(http.MethodGet, "https://nexus.example/", nil)
 	directTLS.TLS = &tls.ConnectionState{}
@@ -90,7 +106,7 @@ func TestSecureRequestRequiresTLSOrTrustedForwardedProto(t *testing.T) {
 }
 
 func TestLoginTransportAllowsHTTPSOrDirectLoopbackOnly(t *testing.T) {
-	server := &Server{cfg: config.Config{TrustedProxies: []string{"10.0.0.0/8", "127.0.0.1", "::1"}}}
+	server := &Server{cfg: config.Config{TrustedProxies: trustedPrefixes(t, "10.0.0.0/8", "127.0.0.1", "::1")}}
 
 	directTLS := httptest.NewRequest(http.MethodPost, "https://nexus.example/v1/auth/login", nil)
 	if !server.loginTransportAllowed(directTLS) {
@@ -188,7 +204,7 @@ func TestUnconfiguredLocalAPIStillRequiresLoopbackRemoteAddress(t *testing.T) {
 }
 
 func TestSameOriginRejectsSpoofedLeadingForwardedValues(t *testing.T) {
-	server := &Server{cfg: config.Config{TrustedProxies: []string{"10.0.0.0/8"}}}
+	server := &Server{cfg: config.Config{TrustedProxies: trustedPrefixes(t, "10.0.0.0/8")}}
 	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/v1/auth/login", nil)
 	req.RemoteAddr = "10.1.2.3:4567"
 	req.Host = "127.0.0.1"
@@ -206,7 +222,7 @@ func TestSameOriginRejectsSpoofedLeadingForwardedValues(t *testing.T) {
 }
 
 func TestClientIPPrefixUsesNearestUntrustedForwardedHop(t *testing.T) {
-	server := &Server{cfg: config.Config{TrustedProxies: []string{"10.0.0.0/8", "192.168.0.0/16"}}}
+	server := &Server{cfg: config.Config{TrustedProxies: trustedPrefixes(t, "10.0.0.0/8", "192.168.0.0/16")}}
 	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/v1/auth/login", nil)
 	req.RemoteAddr = "10.1.2.3:4567"
 	req.Header.Set("X-Forwarded-For", "198.51.100.99, 203.0.113.72, 192.168.1.10")
