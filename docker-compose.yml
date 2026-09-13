@@ -1,22 +1,34 @@
+# 唯一结构源：生产部署也使用本文件，站点差异（数据路径、端口、公网地址、Trusted Proxies、镜像）
+# 一律通过 --env-file 传入的站点 env 表达，不要再手工维护第二份 Compose。
+# 固定 project name：runbook 用 -f 指向仓库内文件，project name 不能依赖 compose 文件所在目录名；
+# 固定为 nexusdock 同时让默认网络稳定为 nexusdock_default，与生产现网名称一致（迁移步骤见 docs/deploy.zh-CN.md）。
+name: nexusdock
+
 services:
   nexusdock:
     build:
       context: .
-      # 与 Dockerfile 的 ARG 缺省一致；发布构建可通过宿主环境变量注入版本信息。
+      # 与 Dockerfile 的 ARG 缺省一致；本地构建可通过站点 env 注入版本信息，生产直接消费发布镜像。
       args:
         NEXUS_VERSION: ${NEXUS_VERSION:-dev}
         NEXUS_REVISION: ${NEXUS_REVISION:-unknown}
         NEXUS_SOURCE: ${NEXUS_SOURCE:-unknown}
-    image: nexusdock:local
+    # 生产用站点 env 固定发布镜像（如 ghcr.io/uvwt/nexusdock:sha-<短SHA>）；
+    # 缺省保持本地构建标签，`docker compose build` 行为不变。
+    image: ${NEXUS_IMAGE:-nexusdock:local}
     container_name: nexusdock
     restart: unless-stopped
+    # 应用优雅关闭最多等待 10s（internal/nexusapp），Docker 默认 10s 就 SIGKILL，刚好可能切断收尾；
+    # 给到 30s 保证在途请求与节点连接排空。
+    stop_grace_period: 30s
     read_only: true
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
     ports:
-      - "127.0.0.1:18777:18777"
+      # 容器内端口固定 18777（镜像 ENV 与 healthcheck 一致），只有宿主机侧是站点差异。
+      - "${NEXUS_HTTP_BIND:-127.0.0.1}:${NEXUS_HTTP_PORT:-18777}:18777"
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m,uid=10001,gid=10001,mode=0700
     volumes:
