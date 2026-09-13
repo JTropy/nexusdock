@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -96,7 +97,8 @@ func TestVectorScoresRejectQueryDimensionMismatch(t *testing.T) {
 
 	registry := NewRegistry(t.TempDir())
 	ai := AIConfig{Enabled: true, Endpoint: embedding.URL, Model: "test-model", Timeout: time.Second}
-	index := VectorIndex{Model: "test-model", Dimension: 2, UpdatedAt: time.Now().UTC(), Documents: map[string]VectorDocument{
+	generation := templateGeneration(nil)
+	index := VectorIndex{Model: "test-model", Generation: generation, Dimension: 2, UpdatedAt: time.Now().UTC(), Documents: map[string]VectorDocument{
 		"development.demo@1.0.0": {
 			ID: "development.demo", Version: "1.0.0", Hash: "sha256:test", Text: "demo", Vector: []float64{1, 0}, UpdatedAt: time.Now().UTC(),
 		},
@@ -104,7 +106,7 @@ func TestVectorScoresRejectQueryDimensionMismatch(t *testing.T) {
 	if err := writeTemplateJSON(registry.vectorIndexPath(), index); err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := registry.loadVectorIndex(ai.Model)
+	loaded, err := registry.loadVectorIndex(ai.Model, generation)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,5 +148,90 @@ func TestVectorIndexValidationRejectsInconsistentDocument(t *testing.T) {
 	}}
 	if err := validateVectorIndex(index, "test-model"); err == nil {
 		t.Fatal("inconsistent workflow vector index was accepted")
+	}
+}
+
+func TestVectorIndexBecomesStaleWhenActiveTemplatesChange(t *testing.T) {
+	embedding := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"embeddings": [][]float64{{1, 0}}})
+	}))
+	defer embedding.Close()
+
+	registry := NewRegistry(t.TempDir())
+	ai := AIConfig{Enabled: true, Endpoint: embedding.URL, Model: "test-model", Timeout: time.Second}
+	if _, err := registry.Publish(testTemplate("development.demo", "1.0.0")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.ReindexVectors(t.Context(), ai); err != nil {
+		t.Fatalf("initial reindex: %v", err)
+	}
+	if status, count := registry.VectorIndexInfo(ai); status != VectorIndexReady || count != 1 {
+		t.Fatalf("initial index status=%q count=%d", status, count)
+	}
+
+	if _, err := registry.Publish(testTemplate("development.demo", "2.0.0")); err != nil {
+		t.Fatal(err)
+	}
+	if status, count := registry.VectorIndexInfo(ai); status != VectorIndexStale || count != 0 {
+		t.Fatalf("changed registry should stale index: status=%q count=%d", status, count)
+	}
+	snapshot, err := registry.VectorIndexSnapshot(ai)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Status != VectorIndexStale {
+		t.Fatalf("snapshot status=%q, want stale", snapshot.Status)
+	}
+}
+
+func TestReindexDoesNotPublishSnapshotFromOldRegistryGeneration(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	embedding := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		once.Do(func() { close(started) })
+		<-release
+		_ = json.NewEncoder(w).Encode(map[string]any{"embeddings": [][]float64{{1, 0}}})
+	}))
+	defer embedding.Close()
+
+	registry := NewRegistry(t.TempDir())
+	ai := AIConfig{Enabled: true, Endpoint: embedding.URL, Model: "test-model", Timeout: time.Second}
+	if _, err := registry.Publish(testTemplate("development.demo", "1.0.0")); err != nil {
+		t.Fatal(err)
+	}
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := registry.ReindexVectors(context.Background(), ai)
+		errCh <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("embedding request did not start")
+	}
+	if _, err := registry.Publish(testTemplate("development.demo", "2.0.0")); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	if err := <-errCh; !errors.Is(err, errRegistryChangedDuringReindex) {
+		t.Fatalf("reindex error=%v, want registry changed", err)
+	}
+	if _, err := os.Stat(registry.vectorIndexPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale generation index should not be written: %v", err)
+	}
+}
+
+func TestLegacyVectorIndexWithoutGenerationIsStale(t *testing.T) {
+	registry := NewRegistry(t.TempDir())
+	ai := AIConfig{Enabled: true, Endpoint: "http://example.invalid", Model: "test-model"}
+	legacy := VectorIndex{Model: ai.Model, Dimension: 1, UpdatedAt: time.Now().UTC(), Documents: map[string]VectorDocument{
+		"development.demo@1.0.0": {ID: "development.demo", Version: "1.0.0", Hash: "sha256:test", Text: "demo", Vector: []float64{1}},
+	}}
+	if err := writeTemplateJSON(registry.vectorIndexPath(), legacy); err != nil {
+		t.Fatal(err)
+	}
+	if status, count := registry.VectorIndexInfo(ai); status != VectorIndexStale || count != 0 {
+		t.Fatalf("legacy index status=%q count=%d", status, count)
 	}
 }

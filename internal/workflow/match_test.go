@@ -31,10 +31,15 @@ func TestMatchReturnsAfterClientCancellation(t *testing.T) {
 	if _, err := registry.Publish(testTemplate("development.demo", "1.0.0")); err != nil {
 		t.Fatal(err)
 	}
+	templates, err := registry.List(StatusActive)
+	if err != nil {
+		t.Fatal(err)
+	}
 	index := VectorIndex{
-		Model:     "test-model",
-		Dimension: 1,
-		UpdatedAt: time.Now().UTC(),
+		Model:      "test-model",
+		Generation: templateGeneration(LatestVersions(templates)),
+		Dimension:  1,
+		UpdatedAt:  time.Now().UTC(),
 		Documents: map[string]VectorDocument{
 			"development.demo@1.0.0": {ID: "development.demo", Version: "1.0.0", Hash: "sha256:test", Text: "demo", Vector: []float64{1}, UpdatedAt: time.Now().UTC()},
 		},
