@@ -124,6 +124,9 @@ func run(args []string) error {
 	// 它对 MCP SDK 的发布/下架回调由 HTTP 网关在初始化时绑定。
 	publishedToolBridge := agentdock.NewPublishedToolBridge(agentDockNodes, logger)
 
+	// Artifact 签名密钥与每节点下载预算独立于 HTTP 生命周期，由组合根创建后注入下载路由。
+	artifactService := agentdock.NewArtifactService(cfg.NexusDataDir)
+
 	// Stage 3 进化分析是应用级后台任务：调度循环与快照构建属于 internal/stage3，
 	// 组合根只负责创建、注入依赖并随进程生命周期启停。settings 中的 Stage 3 字段
 	// 在这里映射为 stage3.WorkerConfig（stage3 不能反向依赖 settings，会构成 import cycle）。
@@ -169,6 +172,7 @@ func run(args []string) error {
 		httpx.WithWorkflowRegistry(workflowRegistry),
 		httpx.WithEvolutionWorker(evolutionWorker),
 		httpx.WithPublishedToolBridge(publishedToolBridge),
+		httpx.WithArtifactService(artifactService),
 	)
 	httpServer := &http.Server{
 		Addr:              cfg.Addr(),
