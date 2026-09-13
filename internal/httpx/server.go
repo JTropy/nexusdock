@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -175,6 +176,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /", uiProtected(s.uiIndex))
 	mux.HandleFunc("GET /ui/", uiProtected(s.uiIndex))
 	mux.HandleFunc("GET /health", s.health)
+	mux.HandleFunc("GET /ready", s.ready)
 	mux.HandleFunc("GET /artifacts/public/{nodeID}/{artifactID}/{filename}", s.servePublicArtifact)
 	mux.HandleFunc("HEAD /artifacts/public/{nodeID}/{artifactID}/{filename}", s.servePublicArtifact)
 	if s.mcpHandler != nil {
@@ -299,7 +301,38 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
+// health 是 liveness 探针：进程能响应即存活，不做任何下游依赖检查，保持极轻量。
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "service": "nexusdock"})
+}
+
+// ready 是 readiness 探针：控制库可执行查询且 Recall 根目录可访问才算就绪。
+// 检查保持轻量（SELECT 1 + Stat），完整完整性检查只在启动时执行一次，
+// 避免周期探针本身变成负载。失败必须返回 503 并带出具体原因，便于排障。
+func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
+	checks := make(map[string]string, 2)
+	if s.db == nil {
+		checks["database"] = "control plane database is not configured"
+	} else {
+		var one int
+		if err := s.db.QueryRowContext(r.Context(), `SELECT 1`).Scan(&one); err != nil {
+			checks["database"] = err.Error()
+		}
+	}
+	if s.store == nil {
+		checks["recall"] = "recall store is not configured"
+	} else {
+		info, err := os.Stat(s.store.Root())
+		if err != nil {
+			checks["recall"] = err.Error()
+		} else if !info.IsDir() {
+			checks["recall"] = "recall repository path is not a directory"
+		}
+	}
+	if len(checks) > 0 {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "service": "nexusdock", "checks": checks})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "service": "nexusdock"})
 }
 
