@@ -40,7 +40,7 @@ func newTestHandler(t *testing.T, cfg config.Config, options ...ServerOption) ht
 	if err != nil {
 		t.Fatalf("New private notes store: %v", err)
 	}
-	serverOptions := []ServerOption{WithSystemDatabase(db), WithAgentDockNodes(nodes), WithPrivateNotes(privateNotes), WithWorkflowRegistry(newTestWorkflowRegistry(cfg.NexusDataDir))}
+	serverOptions := []ServerOption{WithSystemDatabase(db), WithAgentDockNodes(nodes, agentdock.NewHub(nodes)), WithPrivateNotes(privateNotes), WithWorkflowRegistry(newTestWorkflowRegistry(cfg.NexusDataDir))}
 	serverOptions = append(serverOptions, options...)
 	handler := NewServer(cfg, store, slog.Default(), serverOptions...).Handler()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -21,6 +21,7 @@ import (
 	"github.com/uvwt/nexusdock/internal/privatenotes"
 	"github.com/uvwt/nexusdock/internal/recall"
 	"github.com/uvwt/nexusdock/internal/settings"
+	"github.com/uvwt/nexusdock/internal/stage3"
 	"github.com/uvwt/nexusdock/internal/workflow"
 )
 
@@ -115,6 +116,24 @@ func run(args []string) error {
 	// 由组合根显式创建后注入 HTTP 层，REST 与集中式 MCP 工具共用同一实例。
 	workflowRegistry := workflow.NewRegistry(filepath.Join(cfg.NexusDataDir, "workflow-templates"))
 
+	// AgentDock Hub 由组合根显式创建：HTTP 连接升级、Runtime 工具调用与
+	// Stage 3 进化 Worker 都依赖同一个节点连接实例。
+	agentDockHub := agentdock.NewHub(agentDockNodes)
+
+	// Stage 3 进化分析是应用级后台任务：调度循环与快照构建属于 internal/stage3，
+	// 组合根只负责创建、注入依赖并随进程生命周期启停。settings 中的 Stage 3 字段
+	// 在这里映射为 stage3.WorkerConfig（stage3 不能反向依赖 settings，会构成 import cycle）。
+	evolutionWorker := stage3.NewWorker(logger, func(ctx context.Context) (stage3.WorkerConfig, error) {
+		aiSettings, _, err := runtimeSettings.Load(ctx)
+		if err != nil {
+			return stage3.WorkerConfig{}, err
+		}
+		return stage3.WorkerConfig{
+			Enabled: aiSettings.Stage3Enabled, Endpoint: aiSettings.Stage3Endpoint, Model: aiSettings.Stage3Model,
+			APIKey: aiSettings.Stage3APIKey, Timeout: aiSettings.Stage3Timeout, Interval: aiSettings.Stage3Interval,
+		}, nil
+	}, agentDockNodes, agentDockHub, store, workflowRegistry)
+
 	authService := auth.NewService(controlDB)
 	status, err := authService.AdminStatus(ctx)
 	if err != nil {
@@ -134,7 +153,7 @@ func run(args []string) error {
 		store,
 		logger,
 		httpx.WithSystemDatabase(controlDB),
-		httpx.WithAgentDockNodes(agentDockNodes),
+		httpx.WithAgentDockNodes(agentDockNodes, agentDockHub),
 		httpx.WithWebAuthentication(authService),
 		httpx.WithEmbeddingService(embeddingService),
 		httpx.WithRuntimeSettings(runtimeSettings),
@@ -144,6 +163,7 @@ func run(args []string) error {
 		httpx.WithMCPTokenStore(mcpTokenStore),
 		httpx.WithPrivateNotes(privateNoteStore),
 		httpx.WithWorkflowRegistry(workflowRegistry),
+		httpx.WithEvolutionWorker(evolutionWorker),
 	)
 	httpServer := &http.Server{
 		Addr:              cfg.Addr(),
@@ -154,7 +174,8 @@ func run(args []string) error {
 		MaxHeaderBytes:    64 << 10,
 	}
 
-	server.StartEvolutionStage3(ctx)
+	// Worker 随信号 ctx 一起退出；HTTP 服务先优雅停机，再由 cancel 结束后台调度。
+	go evolutionWorker.Run(ctx)
 	logger.Info("nexusdock starting", "addr", cfg.Addr(), "nexus_data_dir", cfg.NexusDataDir, "recall_repo_dir", cfg.RecallRepoDir, "mcp_apps_enabled", mcpAppsEnabled, "embedding_enabled", aiCfg.EmbeddingEnabled, "embedding_model", aiCfg.EmbeddingModel, "stage3_evolution_enabled", aiCfg.Stage3Enabled && aiCfg.Stage3Endpoint != "" && aiCfg.Stage3Model != "")
 	serveErr := serveHTTP(ctx, httpServer)
 	cancel()
