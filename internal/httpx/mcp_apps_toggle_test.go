@@ -64,7 +64,6 @@ func TestNexusMCPAppsDisabledStripsProxiedResultUIOnly(t *testing.T) {
 func TestNexusMCPAppsToggleUpdatesActiveSessionToolPresentation(t *testing.T) {
 	server := &Server{
 		mcpAppsEnabledState: true,
-		mcpTools:            make(map[string]publishedNodeTool),
 		mcpResources:        make(map[string]struct{}),
 	}
 	server.initializeMCPGateway()

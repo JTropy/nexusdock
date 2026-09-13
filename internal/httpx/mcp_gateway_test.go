@@ -1,7 +1,9 @@
 package httpx
 
 import (
+	"log/slog"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -11,8 +13,24 @@ import (
 	"github.com/uvwt/nexusdock/internal/recall"
 )
 
+// newGatewayTestServer 构造绑定契约 Bridge 的最小 MCP 网关测试环境：
+// Bridge 的公开/退休回调与生产 initializeMCPGateway 一样映射到 Server 的 MCP 注册方法。
+func newGatewayTestServer(t *testing.T, store *agentdock.Store) *Server {
+	t.Helper()
+	server := &Server{
+		agentDock:    store,
+		agentDockHub: agentdock.NewHub(store),
+		mcpServer:    mcpsdk.NewServer(&mcpsdk.Implementation{Name: "test", Version: "1"}, nil),
+	}
+	if store != nil {
+		server.publishedToolBridge = agentdock.NewPublishedToolBridge(store, slog.Default())
+		server.bindPublishedToolBridge()
+	}
+	return server
+}
+
 func TestInitializeMCPGatewayAdvertisesFixedInstructions(t *testing.T) {
-	server := &Server{mcpTools: make(map[string]publishedNodeTool), mcpResources: make(map[string]struct{})}
+	server := &Server{mcpResources: make(map[string]struct{})}
 	server.initializeMCPGateway()
 
 	clientTransport, serverTransport := mcpsdk.NewInMemoryTransports()
@@ -108,10 +126,8 @@ func TestRecallUpdateFactPreviewsAndWrites(t *testing.T) {
 }
 
 func TestRegisterNodeToolsKeepsFirstPublishedContract(t *testing.T) {
-	server := &Server{
-		mcpServer: mcpsdk.NewServer(&mcpsdk.Implementation{Name: "test", Version: "1"}, nil),
-		mcpTools:  make(map[string]publishedNodeTool),
-	}
+	store := newHTTPTestAgentDockStore(t)
+	server := newGatewayTestServer(t, store)
 	first := agentdock.ToolDescriptor{
 		Name: "exec_command",
 		InputSchema: map[string]any{
@@ -126,15 +142,17 @@ func TestRegisterNodeToolsKeepsFirstPublishedContract(t *testing.T) {
 			"properties": map[string]any{"timeout": map[string]any{"type": "number"}},
 		},
 	}
+	pairHTTPTestNode(t, store, "device_first_contract", "DockMini", "1.8.3", first)
+	pairHTTPTestNode(t, store, "device_second_contract", "DockAir", "1.9.0", second)
 
-	server.registerNodeTools(agentdock.Node{ID: "node_old", Version: "1.8.3"}, agentdock.Hello{Tools: []agentdock.ToolDescriptor{first}})
-	server.registerNodeTools(agentdock.Node{ID: "node_new", Version: "1.9.0"}, agentdock.Hello{Tools: []agentdock.ToolDescriptor{second}})
+	server.registerNodeTools(agentdock.Node{ID: "node_first", Version: "1.8.3"}, agentdock.Hello{Tools: []agentdock.ToolDescriptor{first}})
+	server.registerNodeTools(agentdock.Node{ID: "node_second", Version: "1.9.0"}, agentdock.Hello{Tools: []agentdock.ToolDescriptor{second}})
 
-	published, ok := server.publishedNodeTool("exec_command")
+	published, ok := server.publishedToolBridge.Published("exec_command")
 	if !ok {
 		t.Fatal("exec_command was not published")
 	}
-	firstHash, _ := toolContractHash(first)
+	firstHash, _ := agentdock.ToolContractHash(first)
 	if published.ContractHash != firstHash || len(published.AcceptedSemanticHashes) != 1 || published.AcceptedSemanticHashes[0] != firstHash {
 		t.Fatalf("published contract changed: %#v", published)
 	}
@@ -156,12 +174,7 @@ func TestCallNodeToolReturnsContractMismatchBeforeInvoke(t *testing.T) {
 			"properties": map[string]any{"timeout": map[string]any{"type": "integer"}},
 		},
 	}
-	server := &Server{
-		agentDock:    store,
-		agentDockHub: agentdock.NewHub(store),
-		mcpServer:    mcpsdk.NewServer(&mcpsdk.Implementation{Name: "test", Version: "1"}, nil),
-		mcpTools:     make(map[string]publishedNodeTool),
-	}
+	server := newGatewayTestServer(t, store)
 	server.registerNodeTools(agentdock.Node{ID: "node_old", Version: "1.8.3"}, agentdock.Hello{Tools: []agentdock.ToolDescriptor{published}})
 
 	result, err := server.callNodeTool(t.Context(), "exec_command", map[string]any{"node_id": target.ID, "timeout": 1})
@@ -197,19 +210,12 @@ func TestCallNodeToolAcceptsSameContractWithDifferentDescription(t *testing.T) {
 		Name: "read_file", Description: "macOS description",
 		InputSchema: map[string]any{"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string", "description": "macOS path"}}},
 	}
-	targetDescriptor, err := cloneToolDescriptor(descriptor)
-	if err != nil {
-		t.Fatal(err)
+	targetDescriptor := agentdock.ToolDescriptor{
+		Name: descriptor.Name, Description: "Windows description",
+		InputSchema: map[string]any{"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string", "description": "Windows or WSL path"}}},
 	}
-	targetDescriptor.Description = "Windows description"
-	targetDescriptor.InputSchema["properties"].(map[string]any)["path"].(map[string]any)["description"] = "Windows or WSL path"
 	target := pairHTTPTestNode(t, store, "device_ijklmnop", "DockWin", "1.8.3", targetDescriptor)
-	server := &Server{
-		agentDock:    store,
-		agentDockHub: agentdock.NewHub(store),
-		mcpServer:    mcpsdk.NewServer(&mcpsdk.Implementation{Name: "test", Version: "1"}, nil),
-		mcpTools:     make(map[string]publishedNodeTool),
-	}
+	server := newGatewayTestServer(t, store)
 	server.registerNodeTools(agentdock.Node{ID: "node_source", Version: "1.8.3"}, agentdock.Hello{Tools: []agentdock.ToolDescriptor{descriptor}})
 
 	result, err := server.callNodeTool(t.Context(), "read_file", map[string]any{"node_id": target.ID, "path": "/tmp/a"})
@@ -222,6 +228,18 @@ func TestCallNodeToolAcceptsSameContractWithDifferentDescription(t *testing.T) {
 	details := result.StructuredContent.(map[string]any)
 	if details["error"] != agentdock.ErrNodeOffline.Error() {
 		t.Fatalf("expected compatible contract to reach hub, got %#v", details)
+	}
+}
+
+func platformContractDescriptor(name string, properties map[string]any, required []any) agentdock.ToolDescriptor {
+	return agentdock.ToolDescriptor{
+		Name: name,
+		InputSchema: map[string]any{
+			"type":                 "object",
+			"properties":           properties,
+			"required":             required,
+			"additionalProperties": false,
+		},
 	}
 }
 
@@ -282,25 +300,21 @@ func TestRegisterNodeToolsPromotesOnlyAfterProvidersConverge(t *testing.T) {
 	}
 	first := pairHTTPTestNode(t, store, "device_qrstuvwx", "DockMini", "1.8.3", oldDescriptor)
 	second := pairHTTPTestNode(t, store, "device_yzabcdef", "DockAir", "1.8.3", oldDescriptor)
-	server := &Server{
-		agentDock: store,
-		mcpServer: mcpsdk.NewServer(&mcpsdk.Implementation{Name: "test", Version: "1"}, nil),
-		mcpTools:  make(map[string]publishedNodeTool),
-	}
+	server := newGatewayTestServer(t, store)
 	server.registerNodeTools(first, agentdock.Hello{Tools: []agentdock.ToolDescriptor{oldDescriptor}})
-	oldHash, _ := toolContractHash(oldDescriptor)
-	newHash, _ := toolContractHash(newDescriptor)
+	oldHash, _ := agentdock.ToolContractHash(oldDescriptor)
+	newHash, _ := agentdock.ToolContractHash(newDescriptor)
 
 	first = updateHTTPTestNodeContract(t, store, first, "1.9.0", newDescriptor)
 	server.registerNodeTools(first, agentdock.Hello{Tools: []agentdock.ToolDescriptor{newDescriptor}})
-	published, _ := server.publishedNodeTool("exec_command")
+	published, _ := server.publishedToolBridge.Published("exec_command")
 	if published.ContractHash != oldHash {
 		t.Fatalf("mixed providers changed public contract: %#v", published)
 	}
 
 	second = updateHTTPTestNodeContract(t, store, second, "1.9.0", newDescriptor)
 	server.registerNodeTools(second, agentdock.Hello{Tools: []agentdock.ToolDescriptor{newDescriptor}})
-	published, _ = server.publishedNodeTool("exec_command")
+	published, _ = server.publishedToolBridge.Published("exec_command")
 	if published.ContractHash != newHash || len(published.AcceptedSemanticHashes) != 1 || published.AcceptedSemanticHashes[0] != newHash {
 		t.Fatalf("converged providers did not promote new contract: %#v", published)
 	}
@@ -316,11 +330,7 @@ func TestRegisterNodeToolsRetiresToolWhenLastProviderDropsCapability(t *testing.
 		},
 	}
 	node := pairHTTPTestNode(t, store, "device_retire_tool", "DockMini", "1.9.0", descriptor)
-	server := &Server{
-		agentDock: store,
-		mcpServer: mcpsdk.NewServer(&mcpsdk.Implementation{Name: "test", Version: "1"}, nil),
-		mcpTools:  make(map[string]publishedNodeTool),
-	}
+	server := newGatewayTestServer(t, store)
 	server.registerNodeTools(node, agentdock.Hello{Tools: []agentdock.ToolDescriptor{descriptor}})
 
 	updated, err := store.UpdateHello(t.Context(), node.ID, agentdock.Hello{
@@ -330,7 +340,7 @@ func TestRegisterNodeToolsRetiresToolWhenLastProviderDropsCapability(t *testing.
 		t.Fatal(err)
 	}
 	server.registerNodeTools(updated, agentdock.Hello{})
-	if _, ok := server.publishedNodeTool("browser_act"); ok {
+	if _, ok := server.publishedToolBridge.Published("browser_act"); ok {
 		t.Fatal("browser_act should retire after the last provider drops the capability")
 	}
 	contracts, err := store.ListPublishedToolContracts(t.Context())
@@ -349,19 +359,15 @@ func TestReconcileKeepsToolWhenLastProviderIsDisabled(t *testing.T) {
 		InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
 	}
 	node := pairHTTPTestNode(t, store, "device_disabled_provider", "DockMini", "1.9.0", descriptor)
-	server := &Server{
-		agentDock: store,
-		mcpServer: mcpsdk.NewServer(&mcpsdk.Implementation{Name: "test", Version: "1"}, nil),
-		mcpTools:  make(map[string]publishedNodeTool),
-	}
+	server := newGatewayTestServer(t, store)
 	server.registerNodeTools(node, agentdock.Hello{Tools: []agentdock.ToolDescriptor{descriptor}})
 
 	disabled := false
 	if _, err := store.Update(t.Context(), node.ID, agentdock.UpdateInput{Enabled: &disabled}); err != nil {
 		t.Fatal(err)
 	}
-	server.reconcileNodeToolContracts([]string{"exec_command"})
-	if _, ok := server.publishedNodeTool("exec_command"); !ok {
+	server.publishedToolBridge.ReconcileNames([]string{"exec_command"})
+	if _, ok := server.publishedToolBridge.Published("exec_command"); !ok {
 		t.Fatal("disabled provider should keep its published tool contract")
 	}
 }
@@ -397,18 +403,14 @@ func TestInitializeMCPGatewayRestoresPublishedContractBeforeNodeOrder(t *testing
 	oldNode := pairHTTPTestNode(t, store, "device_restart_old", "ZuluOld", "1.8.3", oldDescriptor)
 	_ = pairHTTPTestNode(t, store, "device_restart_new", "AlphaNew", "1.9.0", newDescriptor)
 
-	first := &Server{
-		agentDock: store,
-		mcpServer: mcpsdk.NewServer(&mcpsdk.Implementation{Name: "test", Version: "1"}, nil),
-		mcpTools:  make(map[string]publishedNodeTool),
-	}
+	first := newGatewayTestServer(t, store)
 	first.registerNodeTools(oldNode, agentdock.Hello{Tools: []agentdock.ToolDescriptor{oldDescriptor}})
 	first.registerNodeTools(agentdock.Node{ID: "node_new", Version: "1.9.0"}, agentdock.Hello{Tools: []agentdock.ToolDescriptor{newDescriptor}})
-	oldHash, _ := toolContractHash(oldDescriptor)
+	oldHash, _ := agentdock.ToolContractHash(oldDescriptor)
 
-	restarted := &Server{agentDock: store, mcpTools: make(map[string]publishedNodeTool)}
+	restarted := newGatewayTestServer(t, store)
 	restarted.initializeMCPGateway()
-	published, ok := restarted.publishedNodeTool("exec_command")
+	published, ok := restarted.publishedToolBridge.Published("exec_command")
 	if !ok || published.ContractHash != oldHash || len(published.AcceptedSemanticHashes) != 1 || published.AcceptedSemanticHashes[0] != oldHash {
 		t.Fatalf("restart changed published contract: %#v", published)
 	}
@@ -426,9 +428,9 @@ func TestInitializeMCPGatewayRetiresPersistedToolWithoutProvider(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	server := &Server{agentDock: store, mcpTools: make(map[string]publishedNodeTool)}
+	server := newGatewayTestServer(t, store)
 	server.initializeMCPGateway()
-	if _, ok := server.publishedNodeTool("browser_act"); ok {
+	if _, ok := server.publishedToolBridge.Published("browser_act"); ok {
 		t.Fatal("startup should retire persisted tools that no node provides")
 	}
 	contracts, err := store.ListPublishedToolContracts(t.Context())
@@ -454,16 +456,12 @@ func TestRegisterNodeToolsMergesCompatibleCrossVersionContracts(t *testing.T) {
 	}, []any{"command"})
 	oldNode := pairHTTPTestNode(t, store, "device_crossver_old", "DockMini", "1.8.3", oldDescriptor)
 	newNode := pairHTTPTestNode(t, store, "device_crossver_new", "DockWin", "1.9.0", newDescriptor)
-	server := &Server{
-		agentDock: store,
-		mcpServer: mcpsdk.NewServer(&mcpsdk.Implementation{Name: "test", Version: "1"}, nil),
-		mcpTools:  make(map[string]publishedNodeTool),
-	}
+	server := newGatewayTestServer(t, store)
 
 	server.registerNodeTools(oldNode, agentdock.Hello{Tools: []agentdock.ToolDescriptor{oldDescriptor}})
 	server.registerNodeTools(newNode, agentdock.Hello{Tools: []agentdock.ToolDescriptor{newDescriptor}})
 
-	published, ok := server.publishedNodeTool("exec_command")
+	published, ok := server.publishedToolBridge.Published("exec_command")
 	if !ok {
 		t.Fatal("exec_command was not published")
 	}
@@ -471,13 +469,13 @@ func TestRegisterNodeToolsMergesCompatibleCrossVersionContracts(t *testing.T) {
 	if _, ok := properties["runtime"]; !ok {
 		t.Fatalf("fleet schema did not include compatible optional property: %#v", properties)
 	}
-	oldHash, _ := toolContractHash(oldDescriptor)
-	newHash, _ := toolContractHash(newDescriptor)
-	if !containsToolContractHash(published.AcceptedSemanticHashes, oldHash) || !containsToolContractHash(published.AcceptedSemanticHashes, newHash) {
+	oldHash, _ := agentdock.ToolContractHash(oldDescriptor)
+	newHash, _ := agentdock.ToolContractHash(newDescriptor)
+	if !slices.Contains(published.AcceptedSemanticHashes, oldHash) || !slices.Contains(published.AcceptedSemanticHashes, newHash) {
 		t.Fatalf("accepted hashes = %#v", published.AcceptedSemanticHashes)
 	}
 	for _, node := range []agentdock.Node{oldNode, newNode} {
-		mismatch, err := server.nodeToolContractMismatch(t.Context(), node, "exec_command")
+		mismatch, err := server.publishedToolBridge.ToolContractMismatch(t.Context(), node, "exec_command")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -497,9 +495,9 @@ func TestRegisterNodeToolsMergesCompatibleCrossVersionContracts(t *testing.T) {
 		t.Fatalf("synthetic fleet contract should not claim one provider as source: %#v", contracts[0])
 	}
 
-	restarted := &Server{agentDock: store, mcpTools: make(map[string]publishedNodeTool)}
+	restarted := newGatewayTestServer(t, store)
 	restarted.initializeMCPGateway()
-	restored, ok := restarted.publishedNodeTool("exec_command")
+	restored, ok := restarted.publishedToolBridge.Published("exec_command")
 	if !ok || restored.ContractHash != published.ContractHash || !reflect.DeepEqual(restored.AcceptedSemanticHashes, published.AcceptedSemanticHashes) {
 		t.Fatalf("restart did not restore full fleet generation: before=%#v after=%#v", published, restored)
 	}
@@ -517,27 +515,23 @@ func TestNodeToolContractRequiresAcceptedVariantMembership(t *testing.T) {
 	}, []any{"command"})
 	nodeA := pairHTTPTestNode(t, store, "device_variant_a", "DockMini", "1.8.3", variantA)
 	nodeB := pairHTTPTestNode(t, store, "device_variant_b", "DockWin", "1.9.0", variantB)
-	server := &Server{
-		agentDock: store,
-		mcpServer: mcpsdk.NewServer(&mcpsdk.Implementation{Name: "test", Version: "1"}, nil),
-		mcpTools:  make(map[string]publishedNodeTool),
-	}
+	server := newGatewayTestServer(t, store)
 	server.registerNodeTools(nodeA, agentdock.Hello{Tools: []agentdock.ToolDescriptor{variantA}})
 	server.registerNodeTools(nodeB, agentdock.Hello{Tools: []agentdock.ToolDescriptor{variantB}})
 
-	published, _ := server.publishedNodeTool("exec_command")
-	publicHash, _ := toolContractHash(published.Descriptor)
-	if containsToolContractHash(published.AcceptedSemanticHashes, publicHash) {
+	published, _ := server.publishedToolBridge.Published("exec_command")
+	publicHash, _ := agentdock.ToolContractHash(published.Descriptor)
+	if slices.Contains(published.AcceptedSemanticHashes, publicHash) {
 		t.Fatalf("test requires a synthetic public contract distinct from provider variants: %#v", published)
 	}
 
 	// 节点现场漂移成刚好等于 Fleet 并集，也不能因为公共 schema 能覆盖就绕过 generation membership。
 	driftedNode := updateHTTPTestNodeContract(t, store, nodeA, "2.0.0", published.Descriptor)
-	driftedHash, _ := toolContractHash(published.Descriptor)
+	driftedHash, _ := agentdock.ToolContractHash(published.Descriptor)
 	if driftedHash != published.ContractHash {
 		t.Fatalf("drifted hash = %s, public hash = %s", driftedHash, published.ContractHash)
 	}
-	mismatch, err := server.nodeToolContractMismatch(t.Context(), driftedNode, "exec_command")
+	mismatch, err := server.publishedToolBridge.ToolContractMismatch(t.Context(), driftedNode, "exec_command")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -556,19 +550,15 @@ func TestLoadPublishedNodeToolsSeedsLegacyAcceptedVariant(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	server := &Server{
-		agentDock: store,
-		mcpServer: mcpsdk.NewServer(&mcpsdk.Implementation{Name: "test", Version: "1"}, nil),
-		mcpTools:  make(map[string]publishedNodeTool),
-	}
-	if err := server.loadPublishedNodeTools(t.Context()); err != nil {
+	server := newGatewayTestServer(t, store)
+	if err := server.publishedToolBridge.LoadPublished(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	published, ok := server.publishedNodeTool("exec_command")
+	published, ok := server.publishedToolBridge.Published("exec_command")
 	if !ok {
 		t.Fatal("legacy published contract was not restored")
 	}
-	hash, _ := toolContractHash(descriptor)
+	hash, _ := agentdock.ToolContractHash(descriptor)
 	if !reflect.DeepEqual(published.AcceptedSemanticHashes, []string{hash}) {
 		t.Fatalf("legacy accepted hashes = %#v", published.AcceptedSemanticHashes)
 	}

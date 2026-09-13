@@ -120,6 +120,10 @@ func run(args []string) error {
 	// Stage 3 进化 Worker 都依赖同一个节点连接实例。
 	agentDockHub := agentdock.NewHub(agentDockNodes)
 
+	// 节点工具契约 Bridge 持有 fleet 公开契约的业务状态（收敛、持久化、兼容性判定）；
+	// 它对 MCP SDK 的发布/下架回调由 HTTP 网关在初始化时绑定。
+	publishedToolBridge := agentdock.NewPublishedToolBridge(agentDockNodes, logger)
+
 	// Stage 3 进化分析是应用级后台任务：调度循环与快照构建属于 internal/stage3，
 	// 组合根只负责创建、注入依赖并随进程生命周期启停。settings 中的 Stage 3 字段
 	// 在这里映射为 stage3.WorkerConfig（stage3 不能反向依赖 settings，会构成 import cycle）。
@@ -164,6 +168,7 @@ func run(args []string) error {
 		httpx.WithPrivateNotes(privateNoteStore),
 		httpx.WithWorkflowRegistry(workflowRegistry),
 		httpx.WithEvolutionWorker(evolutionWorker),
+		httpx.WithPublishedToolBridge(publishedToolBridge),
 	)
 	httpServer := &http.Server{
 		Addr:              cfg.Addr(),

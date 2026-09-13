@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -190,8 +191,8 @@ func TestDeviceTokenRecallPreviewUsesRealStoreWithoutPersistence(t *testing.T) {
 
 func TestNodeDisablePromotesConvergedToolContract(t *testing.T) {
 	server := newNodeTestServer(t)
-	server.mcpServer = mcpsdk.NewServer(&mcpsdk.Implementation{Name: "test", Version: "1"}, nil)
-	server.mcpTools = make(map[string]publishedNodeTool)
+	server.publishedToolBridge = agentdock.NewPublishedToolBridge(server.agentDock, slog.Default())
+	server.bindPublishedToolBridge()
 	oldDescriptor, newDescriptor := nodeLifecycleTestDescriptors()
 	oldNode := pairHTTPTestNode(t, server.agentDock, "device_disable_old", "DockMini", "1.8.3", oldDescriptor)
 	newNode := pairHTTPTestNode(t, server.agentDock, "device_disable_new", "DockAir", "1.9.0", newDescriptor)
@@ -205,8 +206,8 @@ func TestNodeDisablePromotesConvergedToolContract(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
-	newHash, _ := toolContractHash(newDescriptor)
-	published, _ := server.publishedNodeTool("exec_command")
+	newHash, _ := agentdock.ToolContractHash(newDescriptor)
+	published, _ := server.publishedToolBridge.Published("exec_command")
 	if published.ContractHash != newHash || len(published.AcceptedSemanticHashes) != 1 || published.AcceptedSemanticHashes[0] != newHash {
 		t.Fatalf("disable did not promote remaining contract: %#v", published)
 	}
@@ -214,8 +215,8 @@ func TestNodeDisablePromotesConvergedToolContract(t *testing.T) {
 
 func TestNodeEnableReconcileKeepsCanonicalToolsCentral(t *testing.T) {
 	server := newNodeTestServer(t)
-	server.mcpTools = make(map[string]publishedNodeTool)
-	server.mcpResources = make(map[string]struct{})
+	server.publishedToolBridge = agentdock.NewPublishedToolBridge(server.agentDock, slog.Default())
+	server.bindPublishedToolBridge()
 
 	input, ok := mcpcontract.InputSchema(mcpcontract.ToolAgentDockContext)
 	if !ok {
@@ -275,8 +276,8 @@ func TestNodeEnableReconcileKeepsCanonicalToolsCentral(t *testing.T) {
 
 func TestNodeDeletePromotesConvergedToolContract(t *testing.T) {
 	server := newNodeTestServer(t)
-	server.mcpServer = mcpsdk.NewServer(&mcpsdk.Implementation{Name: "test", Version: "1"}, nil)
-	server.mcpTools = make(map[string]publishedNodeTool)
+	server.publishedToolBridge = agentdock.NewPublishedToolBridge(server.agentDock, slog.Default())
+	server.bindPublishedToolBridge()
 	oldDescriptor, newDescriptor := nodeLifecycleTestDescriptors()
 	oldNode := pairHTTPTestNode(t, server.agentDock, "device_delete_old", "DockMini", "1.8.3", oldDescriptor)
 	newNode := pairHTTPTestNode(t, server.agentDock, "device_delete_new", "DockAir", "1.9.0", newDescriptor)
@@ -290,8 +291,8 @@ func TestNodeDeletePromotesConvergedToolContract(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
-	newHash, _ := toolContractHash(newDescriptor)
-	published, _ := server.publishedNodeTool("exec_command")
+	newHash, _ := agentdock.ToolContractHash(newDescriptor)
+	published, _ := server.publishedToolBridge.Published("exec_command")
 	if published.ContractHash != newHash || len(published.AcceptedSemanticHashes) != 1 || published.AcceptedSemanticHashes[0] != newHash {
 		t.Fatalf("delete did not promote remaining contract: %#v", published)
 	}
@@ -299,8 +300,8 @@ func TestNodeDeletePromotesConvergedToolContract(t *testing.T) {
 
 func TestNodeDeleteRetiresLastPublishedTool(t *testing.T) {
 	server := newNodeTestServer(t)
-	server.mcpServer = mcpsdk.NewServer(&mcpsdk.Implementation{Name: "test", Version: "1"}, nil)
-	server.mcpTools = make(map[string]publishedNodeTool)
+	server.publishedToolBridge = agentdock.NewPublishedToolBridge(server.agentDock, slog.Default())
+	server.bindPublishedToolBridge()
 	descriptor := agentdock.ToolDescriptor{
 		Name:        "browser_act",
 		InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
@@ -315,7 +316,7 @@ func TestNodeDeleteRetiresLastPublishedTool(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
-	if _, ok := server.publishedNodeTool("browser_act"); ok {
+	if _, ok := server.publishedToolBridge.Published("browser_act"); ok {
 		t.Fatal("last deleted provider should retire browser_act")
 	}
 	contracts, err := server.agentDock.ListPublishedToolContracts(t.Context())

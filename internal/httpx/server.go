@@ -97,11 +97,9 @@ type Server struct {
 	mcpToken             *auth.MCPTokenStore
 	workflowRegistry     *workflow.Registry
 	evolutionWorker      *stage3.Worker
+	publishedToolBridge  *agentdock.PublishedToolBridge
 	mcpServer            *mcpsdk.Server
 	mcpHandler           http.Handler
-	mcpReconcileMu       sync.Mutex
-	mcpToolsMu           sync.RWMutex
-	mcpTools             map[string]publishedNodeTool
 	mcpResourcesMu       sync.RWMutex
 	mcpResources         map[string]struct{}
 	artifactSecretMu     sync.Mutex
@@ -168,11 +166,17 @@ func WithEvolutionWorker(worker *stage3.Worker) ServerOption {
 	return func(server *Server) { server.evolutionWorker = worker }
 }
 
+// WithPublishedToolBridge 注入组合根创建的节点工具契约 Bridge；
+// Bridge 维护 fleet 公开契约的业务状态，HTTP 层只负责把它映射为 MCP SDK 的工具注册。
+func WithPublishedToolBridge(bridge *agentdock.PublishedToolBridge) ServerOption {
+	return func(server *Server) { server.publishedToolBridge = bridge }
+}
+
 func NewServer(cfg config.Config, store *recall.Store, logger *slog.Logger, options ...ServerOption) *Server {
 	server := &Server{
 		cfg: cfg, aiCfg: settings.DefaultRuntimeAIConfig(), mcpAppsEnabledState: settings.DefaultMCPAppsEnabled,
 		store: store, logger: logger,
-		mcpTools: make(map[string]publishedNodeTool), mcpResources: make(map[string]struct{}),
+		mcpResources: make(map[string]struct{}),
 	}
 	for _, option := range options {
 		option(server)
