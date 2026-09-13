@@ -3,10 +3,20 @@ package core
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 )
 
-// 当前控制面表。历史 Task/Run/设备表不再创建，启动时若还在就丢掉。
+// CurrentSchemaVersion 是当前程序对应的控制库 Schema 版本。
+// PRAGMA user_version 是唯一的应用 Schema 版本来源，不引入 schema_migrations 表，
+// 避免恢复 a923781 已移除的旧文件式迁移系统（SQL 文件 + checksum 校验 + 备份钩子的复杂度）。
+const CurrentSchemaVersion = 3
+
+// currentSchema 是全新空库初始化用的当前结构。
+// 空库没有历史数据需要逐版本变换，直接建当前结构并写入版本号：
+// 一是省掉对空库逐版本重放 IF NOT EXISTS 的空转，二是保证未来不可重放的数据变换类
+// migration（拆列、回填等）永远不会作用在新库上。已存在的库一律走 schemaMigrations
+// 逐版本升级，两边结构收敛一致由 tests/migration 的收敛测试保证。
 var currentSchema = []string{
 	`CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
@@ -234,34 +244,113 @@ END`,
 )`,
 }
 
-var unusedTables = []string{
-	"agentdock_node_secrets",
-	"agentdock_nodes",
-	"run_verifications",
-	"run_evidence",
-	"run_steps",
-	"runs",
-	"skills",
-	"tasks",
-	"agents",
-	"device_commands_v1",
-	"device_heartbeats",
-	"device_enrollment_tokens",
-	"device_records",
-	"devices",
-	"schema_migrations",
+// EnsureSchema 把控制库升级到 CurrentSchemaVersion，失败时启动流程必须中止。
+func EnsureSchema(ctx context.Context, db *sql.DB) error {
+	return migrateSchema(ctx, db, schemaMigrations)
 }
 
-func EnsureSchema(ctx context.Context, db *sql.DB) error {
-	for _, statement := range currentSchema {
-		if _, err := db.ExecContext(ctx, statement); err != nil {
-			return fmt.Errorf("ensure schema: %w", err)
-		}
+// migrateSchema 按 PRAGMA user_version 把库推进到当前版本。
+// migrations 参数化而不是直接读包级变量，是为了让测试能注入会失败的迁移
+// 验证事务回滚；生产调用方固定传 schemaMigrations。
+func migrateSchema(ctx context.Context, db *sql.DB, migrations []schemaMigration) error {
+	version, err := readSchemaVersion(ctx, db)
+	if err != nil {
+		return err
 	}
-	for _, name := range unusedTables {
-		if _, err := db.ExecContext(ctx, "DROP TABLE IF EXISTS "+name); err != nil {
-			return fmt.Errorf("drop unused table %s: %w", name, err)
+	// user_version=0 同时对应"全新空库"和"未版本化旧库"（引入版本化之前的库版本号都是 0），
+	// 必须用核心表是否存在来区分：users 从最早的 0001_core.sql 起就是每个历史版本
+	// 第一张创建的表，旧的非事务 EnsureSchema 也最先建它，任何真实 NexusDock 库都有 users。
+	hasCoreTables, err := tableExists(ctx, db, "users")
+	if err != nil {
+		return err
+	}
+	if version == 0 && !hasCoreTables {
+		return initializeSchema(ctx, db)
+	}
+	// 旧二进制遇到更高版本的库必须拒绝启动，避免把新结构当旧结构读写破坏数据。
+	if version > CurrentSchemaVersion {
+		return fmt.Errorf("control database schema version %d is newer than supported version %d", version, CurrentSchemaVersion)
+	}
+	for _, migration := range migrations {
+		if migration.version <= version {
+			continue
+		}
+		if err := applyMigration(ctx, db, migration); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// initializeSchema 在单个事务内把全新空库建到当前结构并写入版本号。
+func initializeSchema(ctx context.Context, db *sql.DB) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin schema initialization: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, statement := range currentSchema {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("initialize schema: %w", err)
+		}
+	}
+	if err := writeSchemaVersion(ctx, tx, CurrentSchemaVersion); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit schema initialization: %w", err)
+	}
+	return nil
+}
+
+// applyMigration 在单个事务内执行一个迁移并推进版本号。
+// SQLite 的 user_version 修改参与事务，任一语句失败时表结构变更和版本号一起回滚；
+// journal_mode/synchronous 这类不能进事务的 PRAGMA 仍由 OpenSQLite 在连接层设置。
+func applyMigration(ctx context.Context, db *sql.DB, migration schemaMigration) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration v%d (%s): %w", migration.version, migration.name, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	for i, statement := range migration.statements {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("migration v%d (%s) statement %d: %w", migration.version, migration.name, i+1, err)
+		}
+	}
+	if err := writeSchemaVersion(ctx, tx, migration.version); err != nil {
+		return fmt.Errorf("migration v%d (%s): %w", migration.version, migration.name, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration v%d (%s): %w", migration.version, migration.name, err)
+	}
+	return nil
+}
+
+// writeSchemaVersion 与建表语句同事务执行；PRAGMA 不支持参数绑定，
+// 版本号是程序内部的 int 常量，直接拼接是安全的。
+func writeSchemaVersion(ctx context.Context, tx *sql.Tx, version int) error {
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", version)); err != nil {
+		return fmt.Errorf("write schema version %d: %w", version, err)
+	}
+	return nil
+}
+
+func readSchemaVersion(ctx context.Context, db *sql.DB) (int, error) {
+	var version int
+	if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+		return 0, fmt.Errorf("read schema version: %w", err)
+	}
+	return version, nil
+}
+
+func tableExists(ctx context.Context, db *sql.DB, name string) (bool, error) {
+	var found string
+	err := db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`, name).Scan(&found)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("check table %s: %w", name, err)
+	}
+	return true, nil
 }
