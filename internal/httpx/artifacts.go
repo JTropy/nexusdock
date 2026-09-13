@@ -2,19 +2,14 @@ package httpx
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"log/slog"
 	"mime"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -24,12 +19,11 @@ import (
 )
 
 const (
-	maxProxiedArtifactBytes               = 512 << 20
-	artifactChunkTimeout                  = 30 * time.Second
-	maxArtifactChunkRequests              = (maxProxiedArtifactBytes + protocol.MaxArtifactChunkBytes - 1) / protocol.MaxArtifactChunkBytes
-	maxConcurrentArtifactDownloadsPerNode = 2
-	// The overall deadline intentionally bounds slow or adversarial nodes even when
-	// every individual chunk remains below artifactChunkTimeout.
+	maxProxiedArtifactBytes  = 512 << 20
+	artifactChunkTimeout     = 30 * time.Second
+	maxArtifactChunkRequests = (maxProxiedArtifactBytes + protocol.MaxArtifactChunkBytes - 1) / protocol.MaxArtifactChunkBytes
+	// 整体 deadline 刻意约束慢节点或恶意节点：即使每个分块都小于 artifactChunkTimeout，
+	// 总时长也有硬上限。
 	artifactDownloadTimeout = 30 * time.Minute
 )
 
@@ -46,7 +40,7 @@ func (s *Server) decorateArtifactToolResult(nodeID string, envelope map[string]a
 	sha, _ := structured["sha256"].(string)
 	sha = strings.ToLower(strings.TrimSpace(sha))
 	expiresText, _ := structured["expires_at"].(string)
-	if artifactID == "" || filename == "" || !validArtifactSHA(sha) || expiresText == "" {
+	if artifactID == "" || filename == "" || !agentdock.ValidArtifactSHA(sha) || expiresText == "" {
 		return nil
 	}
 	expiresAt, err := time.Parse(time.RFC3339Nano, expiresText)
@@ -77,12 +71,16 @@ func refreshEnvelopeTextContent(envelope, structured map[string]any) {
 	}
 }
 
+// signedArtifactURL 组装签名下载 URL。签名密钥与并发下载状态由组合根注入的
+// ArtifactService 持有；这里只负责 URL 形状与公网 origin 的拼接。
 func (s *Server) signedArtifactURL(nodeID, artifactID, filename, sha string, expires int64) (string, error) {
-	secret, err := s.artifactSigningSecret()
+	if s.artifacts == nil {
+		return "", errors.New("Artifact 签名能力未注入")
+	}
+	signature, err := s.artifacts.Sign(nodeID, artifactID, filename, sha, expires)
 	if err != nil {
 		return "", err
 	}
-	signature := signArtifactURL(secret, nodeID, artifactID, filename, sha, expires)
 	query := url.Values{
 		"expires": {strconv.FormatInt(expires, 10)},
 		"sha256":  {sha},
@@ -98,13 +96,17 @@ func (s *Server) servePublicArtifact(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	if s.artifacts == nil {
+		writeError(w, http.StatusInternalServerError, "ARTIFACT_SECRET_FAILED", "Artifact download is temporarily unavailable")
+		return
+	}
 	nodeID := strings.TrimSpace(r.PathValue("nodeID"))
 	artifactID := strings.TrimSpace(r.PathValue("artifactID"))
 	filename := strings.TrimSpace(r.PathValue("filename"))
 	expires, parseErr := strconv.ParseInt(r.URL.Query().Get("expires"), 10, 64)
 	sha := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("sha256")))
 	signature := strings.TrimSpace(r.URL.Query().Get("sig"))
-	if nodeID == "" || artifactID == "" || filename == "" || parseErr != nil || expires <= 0 || !validArtifactSHA(sha) || signature == "" {
+	if nodeID == "" || artifactID == "" || filename == "" || parseErr != nil || expires <= 0 || !agentdock.ValidArtifactSHA(sha) || signature == "" {
 		http.NotFound(w, r)
 		return
 	}
@@ -112,23 +114,17 @@ func (s *Server) servePublicArtifact(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, http.StatusText(http.StatusGone), http.StatusGone)
 		return
 	}
-	secret, err := s.artifactSigningSecret()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "ARTIFACT_SECRET_FAILED", "Artifact download is temporarily unavailable")
-		return
-	}
-	expected := signArtifactURL(secret, nodeID, artifactID, filename, sha, expires)
-	if !hmac.Equal([]byte(expected), []byte(signature)) {
+	if !s.artifacts.Verify(nodeID, artifactID, filename, sha, signature, expires) {
 		http.NotFound(w, r)
 		return
 	}
 	if r.Method == http.MethodGet {
-		if !s.acquireArtifactDownload(nodeID) {
+		if !s.artifacts.AcquireDownload(nodeID) {
 			w.Header().Set("Retry-After", "5")
 			writeError(w, http.StatusTooManyRequests, "ARTIFACT_DOWNLOAD_BUSY", "Too many concurrent Artifact downloads for this node")
 			return
 		}
-		defer s.releaseArtifactDownload(nodeID)
+		defer s.artifacts.ReleaseDownload(nodeID)
 	}
 
 	downloadCtx, cancel := context.WithTimeout(r.Context(), artifactDownloadTimeout)
@@ -196,12 +192,12 @@ func (s *Server) servePublicArtifact(w http.ResponseWriter, r *http.Request) {
 			panic(http.ErrAbortHandler)
 		}
 		if err := validateArtifactChunk(chunk, artifactID, filename, sha, expires, offset, false); err != nil {
-			s.artifactLogger().Error("validate AgentDock Artifact chunk", "node_id", nodeID, "artifact_id", artifactID, "offset", offset, "error", err)
+			s.artifactLogger().Error("validate AgentDock Artifact chunk", "node_id", nodeID, "artifact_id", artifactID, "error", err)
 			panic(http.ErrAbortHandler)
 		}
 		data, decodeErr := decodeArtifactChunkData(chunk, offset)
 		if decodeErr != nil {
-			s.artifactLogger().Error("decode AgentDock Artifact chunk", "node_id", nodeID, "artifact_id", artifactID, "offset", offset, "error", decodeErr)
+			s.artifactLogger().Error("decode AgentDock Artifact chunk", "node_id", nodeID, "artifact_id", artifactID, "error", decodeErr)
 			panic(http.ErrAbortHandler)
 		}
 		_, _ = hasher.Write(data)
@@ -288,29 +284,6 @@ func setArtifactPublicHeaders(headers http.Header) {
 	headers.Set("X-Content-Type-Options", "nosniff")
 }
 
-func (s *Server) acquireArtifactDownload(nodeID string) bool {
-	s.artifactDownloadsMu.Lock()
-	defer s.artifactDownloadsMu.Unlock()
-	if s.artifactDownloads == nil {
-		s.artifactDownloads = make(map[string]int)
-	}
-	if s.artifactDownloads[nodeID] >= maxConcurrentArtifactDownloadsPerNode {
-		return false
-	}
-	s.artifactDownloads[nodeID]++
-	return true
-}
-
-func (s *Server) releaseArtifactDownload(nodeID string) {
-	s.artifactDownloadsMu.Lock()
-	defer s.artifactDownloadsMu.Unlock()
-	if s.artifactDownloads[nodeID] <= 1 {
-		delete(s.artifactDownloads, nodeID)
-		return
-	}
-	s.artifactDownloads[nodeID]--
-}
-
 func (s *Server) writeArtifactBridgeError(w http.ResponseWriter, err error) {
 	status := http.StatusBadGateway
 	code := "ARTIFACT_PROXY_FAILED"
@@ -321,104 +294,4 @@ func (s *Server) writeArtifactBridgeError(w http.ResponseWriter, err error) {
 		code = "ARTIFACT_NODE_OFFLINE"
 	}
 	writeError(w, status, code, err.Error())
-}
-
-func (s *Server) artifactSigningSecret() ([]byte, error) {
-	s.artifactSecretMu.Lock()
-	defer s.artifactSecretMu.Unlock()
-	dataDir := strings.TrimSpace(s.cfg.NexusDataDir)
-	if dataDir == "" {
-		return nil, errors.New("NEXUS_DATA_DIR is required for Artifact URL signing")
-	}
-	secretPath := filepath.Join(dataDir, "secrets", "artifact-url-secret")
-	secretDir := filepath.Dir(secretPath)
-	if err := os.MkdirAll(secretDir, 0o700); err != nil {
-		return nil, fmt.Errorf("create NexusDock secrets directory: %w", err)
-	}
-	if err := os.Chmod(secretDir, 0o700); err != nil {
-		return nil, fmt.Errorf("secure NexusDock secrets directory: %w", err)
-	}
-	if secret, err := readArtifactSigningSecret(secretPath); err == nil {
-		return secret, nil
-	} else if !os.IsNotExist(err) {
-		return nil, err
-	}
-
-	secret := make([]byte, sha256.Size)
-	if _, err := rand.Read(secret); err != nil {
-		return nil, fmt.Errorf("generate NexusDock Artifact signing secret: %w", err)
-	}
-	tmp, err := os.CreateTemp(secretDir, ".artifact-url-secret-*")
-	if err != nil {
-		return nil, fmt.Errorf("create NexusDock Artifact signing secret temp file: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return nil, fmt.Errorf("secure NexusDock Artifact signing secret temp file: %w", err)
-	}
-	if _, err := tmp.WriteString(hex.EncodeToString(secret) + "\n"); err != nil {
-		_ = tmp.Close()
-		return nil, fmt.Errorf("write NexusDock Artifact signing secret: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return nil, fmt.Errorf("sync NexusDock Artifact signing secret: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return nil, fmt.Errorf("close NexusDock Artifact signing secret: %w", err)
-	}
-	if err := os.Link(tmpPath, secretPath); err == nil {
-		syncDirectoryBestEffort(secretDir)
-		return secret, nil
-	} else if !os.IsExist(err) {
-		return nil, fmt.Errorf("publish NexusDock Artifact signing secret: %w", err)
-	}
-	return readArtifactSigningSecret(secretPath)
-}
-
-func readArtifactSigningSecret(path string) ([]byte, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return nil, err
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return nil, errors.New("NexusDock Artifact signing secret must not be a symbolic link")
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read NexusDock Artifact signing secret: %w", err)
-	}
-	secret, err := hex.DecodeString(strings.TrimSpace(string(data)))
-	if err != nil || len(secret) != sha256.Size {
-		return nil, errors.New("NexusDock Artifact signing secret has an invalid format")
-	}
-	if err := os.Chmod(path, 0o600); err != nil {
-		return nil, fmt.Errorf("secure NexusDock Artifact signing secret: %w", err)
-	}
-	return secret, nil
-}
-
-func syncDirectoryBestEffort(path string) {
-	dir, err := os.Open(path)
-	if err != nil {
-		return
-	}
-	_ = dir.Sync()
-	_ = dir.Close()
-}
-
-func signArtifactURL(secret []byte, nodeID, artifactID, filename, sha string, expires int64) string {
-	mac := hmac.New(sha256.New, secret)
-	_, _ = fmt.Fprintf(mac, "%s\x00%s\x00%s\x00%s\x00%d", nodeID, artifactID, filename, sha, expires)
-	return hex.EncodeToString(mac.Sum(nil))
-}
-
-func validArtifactSHA(value string) bool {
-	if len(value) != sha256.Size*2 {
-		return false
-	}
-	_, err := hex.DecodeString(value)
-	return err == nil
 }

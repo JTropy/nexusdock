@@ -113,8 +113,8 @@ func TestNexusSignedArtifactURLStreamsFromConnectedNode(t *testing.T) {
 	}()
 
 	server := &Server{
-		cfg:          config.Config{PublicURL: "https://nexus.example.test", NexusDataDir: t.TempDir()},
-		agentDockHub: hub, logger: slog.Default(),
+		cfg:          config.Config{PublicURL: "https://nexus.example.test"},
+		agentDockHub: hub, artifacts: agentdock.NewArtifactService(t.TempDir()), logger: slog.Default(),
 	}
 	envelope := map[string]any{
 		"isError": false,
@@ -173,7 +173,7 @@ func TestNexusArtifactStreamWithholdsCorruptFinalChunk(t *testing.T) {
 	expiresAt := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
 
 	hub, node, serveDone := startArtifactBridgeNode(t, served, sha, expiresAt, nil)
-	server := &Server{cfg: config.Config{PublicURL: "https://nexus.example.test", NexusDataDir: t.TempDir()}, agentDockHub: hub, logger: slog.Default()}
+	server := &Server{cfg: config.Config{PublicURL: "https://nexus.example.test"}, agentDockHub: hub, artifacts: agentdock.NewArtifactService(t.TempDir()), logger: slog.Default()}
 	publicURL, err := server.signedArtifactURL(node.ID, "artifact123", "report.txt", sha, expiresAt.Unix())
 	if err != nil {
 		t.Fatal(err)
@@ -204,21 +204,22 @@ func TestNexusArtifactStreamWithholdsCorruptFinalChunk(t *testing.T) {
 
 func TestArtifactDownloadConcurrencyLimitIsPerNode(t *testing.T) {
 	server := &Server{
-		cfg:          config.Config{PublicURL: "https://nexus.example.test", NexusDataDir: t.TempDir()},
+		cfg:          config.Config{PublicURL: "https://nexus.example.test"},
 		agentDockHub: agentdock.NewHub(nil),
+		artifacts:    agentdock.NewArtifactService(t.TempDir()),
 		logger:       slog.Default(),
 	}
 	const nodeID = "node_busy"
-	if !server.acquireArtifactDownload(nodeID) || !server.acquireArtifactDownload(nodeID) {
+	if !server.artifacts.AcquireDownload(nodeID) || !server.artifacts.AcquireDownload(nodeID) {
 		t.Fatal("first two downloads should acquire a node slot")
 	}
-	if server.acquireArtifactDownload(nodeID) {
+	if server.artifacts.AcquireDownload(nodeID) {
 		t.Fatal("third concurrent download unexpectedly acquired a node slot")
 	}
-	if !server.acquireArtifactDownload("node_other") {
+	if !server.artifacts.AcquireDownload("node_other") {
 		t.Fatal("a different node should have an independent download budget")
 	}
-	server.releaseArtifactDownload("node_other")
+	server.artifacts.ReleaseDownload("node_other")
 
 	expires := time.Now().UTC().Add(time.Hour).Unix()
 	sha := strings.Repeat("a", 64)
@@ -238,12 +239,12 @@ func TestArtifactDownloadConcurrencyLimitIsPerNode(t *testing.T) {
 	if response.Header().Get("Retry-After") != "5" || response.Header().Get("Access-Control-Allow-Origin") != "*" || response.Header().Get("Cross-Origin-Resource-Policy") != "cross-origin" {
 		t.Fatalf("busy headers = %#v", response.Header())
 	}
-	server.releaseArtifactDownload(nodeID)
-	server.releaseArtifactDownload(nodeID)
-	if !server.acquireArtifactDownload(nodeID) {
+	server.artifacts.ReleaseDownload(nodeID)
+	server.artifacts.ReleaseDownload(nodeID)
+	if !server.artifacts.AcquireDownload(nodeID) {
 		t.Fatal("released node slots were not reusable")
 	}
-	server.releaseArtifactDownload(nodeID)
+	server.artifacts.ReleaseDownload(nodeID)
 }
 
 func TestNexusArtifactDownloadSupportsEmptyPayload(t *testing.T) {
@@ -252,7 +253,7 @@ func TestNexusArtifactDownloadSupportsEmptyPayload(t *testing.T) {
 	sha := hex.EncodeToString(digest[:])
 	expiresAt := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
 	hub, node, serveDone := startArtifactBridgeNode(t, payload, sha, expiresAt, nil)
-	server := &Server{cfg: config.Config{PublicURL: "https://nexus.example.test", NexusDataDir: t.TempDir()}, agentDockHub: hub, logger: slog.Default()}
+	server := &Server{cfg: config.Config{PublicURL: "https://nexus.example.test"}, agentDockHub: hub, artifacts: agentdock.NewArtifactService(t.TempDir()), logger: slog.Default()}
 	publicURL, err := server.signedArtifactURL(node.ID, "artifact123", "report.txt", sha, expiresAt.Unix())
 	if err != nil {
 		t.Fatal(err)
@@ -322,7 +323,7 @@ func TestNexusArtifactStreamRejectsCrossChunkSizeChange(t *testing.T) {
 			result["size_bytes"] = int64(len(payload)) + 1
 		}
 	})
-	server := &Server{cfg: config.Config{PublicURL: "https://nexus.example.test", NexusDataDir: t.TempDir()}, agentDockHub: hub, logger: slog.Default()}
+	server := &Server{cfg: config.Config{PublicURL: "https://nexus.example.test"}, agentDockHub: hub, artifacts: agentdock.NewArtifactService(t.TempDir()), logger: slog.Default()}
 	publicURL, err := server.signedArtifactURL(node.ID, "artifact123", "report.txt", sha, expiresAt.Unix())
 	if err != nil {
 		t.Fatal(err)
@@ -356,7 +357,7 @@ func TestNexusArtifactStreamRejectsCrossChunkSizeChange(t *testing.T) {
 
 func TestNexusArtifactDownloadStatusBoundaries(t *testing.T) {
 	t.Run("expired", func(t *testing.T) {
-		server := &Server{cfg: config.Config{PublicURL: "https://nexus.example.test", NexusDataDir: t.TempDir()}, agentDockHub: agentdock.NewHub(nil), logger: slog.Default()}
+		server := &Server{cfg: config.Config{PublicURL: "https://nexus.example.test"}, agentDockHub: agentdock.NewHub(nil), artifacts: agentdock.NewArtifactService(t.TempDir()), logger: slog.Default()}
 		expires := time.Now().UTC().Add(-time.Minute).Unix()
 		sha := strings.Repeat("a", 64)
 		publicURL, err := server.signedArtifactURL("node_1", "artifact1", "report.txt", sha, expires)
@@ -376,7 +377,7 @@ func TestNexusArtifactDownloadStatusBoundaries(t *testing.T) {
 	})
 
 	t.Run("offline", func(t *testing.T) {
-		server := &Server{cfg: config.Config{PublicURL: "https://nexus.example.test", NexusDataDir: t.TempDir()}, agentDockHub: agentdock.NewHub(nil), logger: slog.Default()}
+		server := &Server{cfg: config.Config{PublicURL: "https://nexus.example.test"}, agentDockHub: agentdock.NewHub(nil), artifacts: agentdock.NewArtifactService(t.TempDir()), logger: slog.Default()}
 		expires := time.Now().UTC().Add(time.Hour).Unix()
 		sha := strings.Repeat("a", 64)
 		publicURL, err := server.signedArtifactURL("node_1", "artifact1", "report.txt", sha, expires)
@@ -406,7 +407,7 @@ func TestNexusArtifactDownloadStatusBoundaries(t *testing.T) {
 				result["eof"] = false
 			}
 		})
-		server := &Server{cfg: config.Config{PublicURL: "https://nexus.example.test", NexusDataDir: t.TempDir()}, agentDockHub: hub, logger: slog.Default()}
+		server := &Server{cfg: config.Config{PublicURL: "https://nexus.example.test"}, agentDockHub: hub, artifacts: agentdock.NewArtifactService(t.TempDir()), logger: slog.Default()}
 		publicURL, err := server.signedArtifactURL(node.ID, "artifact123", "report.txt", sha, expiresAt.Unix())
 		if err != nil {
 			t.Fatal(err)
@@ -515,8 +516,8 @@ func startArtifactBridgeNode(t *testing.T, payload []byte, advertisedSHA string,
 
 func TestNexusSignedArtifactURLRejectsTampering(t *testing.T) {
 	server := &Server{
-		cfg:          config.Config{PublicURL: "https://nexus.example.test", NexusDataDir: t.TempDir()},
-		agentDockHub: agentdock.NewHub(nil), logger: slog.Default(),
+		cfg:          config.Config{PublicURL: "https://nexus.example.test"},
+		agentDockHub: agentdock.NewHub(nil), artifacts: agentdock.NewArtifactService(t.TempDir()), logger: slog.Default(),
 	}
 	expires := time.Now().UTC().Add(time.Hour).Unix()
 	sha := strings.Repeat("a", 64)

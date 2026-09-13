@@ -101,9 +101,10 @@ func TestCallNodeToolKeepsSuccessWhenArtifactDecorationFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := &Server{
-		cfg:          config.Config{PublicURL: "https://nexus.example.test", NexusDataDir: badDataDir},
+		cfg:          config.Config{PublicURL: "https://nexus.example.test"},
 		agentDock:    store,
 		agentDockHub: hub,
+		artifacts:    agentdock.NewArtifactService(badDataDir),
 		mcpServer:    mcpsdk.NewServer(&mcpsdk.Implementation{Name: "test", Version: "1"}, nil),
 		mcpResources: make(map[string]struct{}),
 		logger:       slog.Default(),

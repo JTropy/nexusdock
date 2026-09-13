@@ -102,9 +102,7 @@ type Server struct {
 	mcpHandler           http.Handler
 	mcpResourcesMu       sync.RWMutex
 	mcpResources         map[string]struct{}
-	artifactSecretMu     sync.Mutex
-	artifactDownloadsMu  sync.Mutex
-	artifactDownloads    map[string]int
+	artifacts            *agentdock.ArtifactService
 }
 
 type ServerOption func(*Server)
@@ -170,6 +168,12 @@ func WithEvolutionWorker(worker *stage3.Worker) ServerOption {
 // Bridge 维护 fleet 公开契约的业务状态，HTTP 层只负责把它映射为 MCP SDK 的工具注册。
 func WithPublishedToolBridge(bridge *agentdock.PublishedToolBridge) ServerOption {
 	return func(server *Server) { server.publishedToolBridge = bridge }
+}
+
+// WithArtifactService 注入组合根创建的 Artifact 能力（签名密钥与每节点下载预算）；
+// HTTP 层只保留下载路由、URL 拼装与响应映射。
+func WithArtifactService(service *agentdock.ArtifactService) ServerOption {
+	return func(server *Server) { server.artifacts = service }
 }
 
 func NewServer(cfg config.Config, store *recall.Store, logger *slog.Logger, options ...ServerOption) *Server {
