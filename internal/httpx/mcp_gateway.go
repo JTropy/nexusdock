@@ -184,6 +184,14 @@ func nodeMCPToolWithApps(descriptor agentdock.ToolDescriptor, mcpAppsEnabled boo
 			tool.Meta = meta
 		}
 	}
+	if descriptor.Name == "view_image" && mcpAppsEnabled {
+		if tool.Meta == nil {
+			tool.Meta = mcpsdk.Meta{}
+		}
+		// 仅提供宿主侧图片附件入口，不改节点协议或其他客户端的 image content。
+		tool.Meta["ui"] = map[string]any{"resourceUri": imageAppURI}
+		tool.Meta["openai/outputTemplate"] = imageAppURI
+	}
 	return tool
 }
 
@@ -331,6 +339,19 @@ func gatewayToolResult(name string, result map[string]any, err error) (*mcpsdk.C
 
 func (s *Server) gatewayToolResult(name string, result map[string]any, err error) (*mcpsdk.CallToolResult, error) {
 	response, responseErr := gatewayToolResult(name, result, err)
+	if responseErr == nil && response != nil && !response.IsError && name == "view_image" && s.mcpAppsEnabled() {
+		for _, content := range response.Content {
+			if _, ok := content.(*mcpsdk.ImageContent); ok {
+				if response.Meta == nil {
+					response.Meta = mcpsdk.Meta{}
+				}
+				response.Meta["ui"] = map[string]any{"resourceUri": imageAppURI}
+				response.Meta["openai/outputTemplate"] = imageAppURI
+				response.Content = append(response.Content, &mcpsdk.TextContent{Text: "图片已返回。若客户端未将图片直接提供给模型，可在图片组件中将它附加到下一轮对话。"})
+				break
+			}
+		}
+	}
 	if responseErr != nil || response == nil || s.mcpAppsEnabled() || response.Meta == nil {
 		return response, responseErr
 	}

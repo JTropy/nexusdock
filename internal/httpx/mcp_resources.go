@@ -23,6 +23,7 @@ type nexusOwnedMCPApp struct {
 }
 
 var nexusOwnedMCPApps = []nexusOwnedMCPApp{
+	{URI: imageAppURI, View: "view_image", Title: "NexusDock image", Description: "Display the requested image and attach it to a ChatGPT follow-up."},
 	{URI: protocol.ContextUIResourceURI, View: "agentdock_context", Title: "NexusDock context", Description: "NexusDock fleet context and shared capability view."},
 	{URI: protocol.RecallUIResourceURI, View: "recall", Title: "NexusDock Recall", Description: "NexusDock Recall write result view."},
 	{URI: protocol.WorkflowUIResourceURI, View: "workflow", Title: "NexusDock workflow", Description: "NexusDock workflow template match view."},
@@ -157,10 +158,14 @@ func (s *Server) readPublishedMCPAppResource(ctx context.Context, uri string) (*
 }
 
 func nexusOwnedMCPAppReadResult(app nexusOwnedMCPApp, publicURL string) *mcpsdk.ReadResourceResult {
+	html := mcpapps.HTML(app.View, app.Title)
+	if app.URI == imageAppURI {
+		html = imageAppHTML
+	}
 	return &mcpsdk.ReadResourceResult{Contents: []*mcpsdk.ResourceContents{{
 		URI:      app.URI,
 		MIMEType: protocol.MCPAppMIMEType,
-		Text:     mcpapps.HTML(app.View, app.Title),
+		Text:     html,
 		Meta:     nexusMCPAppResourceMeta(publicURL),
 	}}}
 }

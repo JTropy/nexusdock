@@ -9,7 +9,7 @@ BUILD_LDFLAGS := -X github.com/uvwt/nexusdock/internal/buildinfo.Version=$(BUILD
 	-X github.com/uvwt/nexusdock/internal/buildinfo.Revision=$(BUILD_REVISION) \
 	-X github.com/uvwt/nexusdock/internal/buildinfo.Source=$(BUILD_SOURCE)
 
-.PHONY: fmt fmt-check test test-race vet tidy-check contracts repository-check web-deps web-build build build-nexusdock check ci run run-nexusdock clean
+.PHONY: fmt fmt-check test test-race vet tidy-check contracts repository-check web-deps web-build build build-nexusdock check ci run run-nexusdock clean image-app-test
 
 fmt:
 	gofmt -w $(GO_SOURCES)
@@ -50,7 +50,10 @@ web-build: web-deps
 
 check: fmt-check tidy-check test vet contracts repository-check
 
-ci: web-build check test-race build-nexusdock
+image-app-test:
+	node --test scripts/test-image-app.mjs
+
+ci: web-build image-app-test check test-race build-nexusdock
 
 build: web-build check build-nexusdock
 
