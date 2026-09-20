@@ -51,7 +51,7 @@ web-build: web-deps
 check: fmt-check tidy-check test vet contracts repository-check
 
 image-app-test:
-	node --test scripts/test-image-app.mjs
+	@task_shared_apps="$$(go list -f '{{.Dir}}' github.com/uvwt/agentdock-protocol/mcpapps)" && node --test "$$task_shared_apps/image.test.mjs"
 
 ci: web-build image-app-test check test-race build-nexusdock
 

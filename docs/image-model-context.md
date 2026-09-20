@@ -19,7 +19,15 @@
 - 重复点击复用已取得的文件 ID；上传失败可重试，上传途中换图不会把旧图附到新结果。
 - 上传后的文件由 ChatGPT 管理，节点原 Artifact 的过期时间不等同于 ChatGPT 文件保留期限。
 
-## 验证
+## 共享实现与合并依赖
+
+图片 HTML、宿主桥接及 7 个组件行为测试已移到 `agentdock-protocol/mcpapps`，AgentDock 直连和 NexusDock 使用同一实现，不再维护两份图片组件。`make image-app-test` 从当前解析到的协议模块运行共享测试。
+
+本次更新依赖 [agentdock-protocol #6](https://github.com/uvwt/agentdock-protocol/pull/6)。当前 `go.mod` 的 v0.8.1 不含新接口，配套 PR 因此保持草稿；合并前须等待协议合并发布，更新 `go.mod` / `go.sum` 到真实上游版本，并重新验证独立构建。不使用本地路径 replace 或私人 fork 依赖。
+
+审阅时将本仓库与协议 PR 分支加入临时 Go workspace：`go work init <协议仓库路径> <本仓库路径>`，设置 `GOWORK` 为生成文件的绝对路径后运行 `make ci`。这能验证联动代码，但不能代替发布依赖后的独立构建。
+
+## 验证方式
 
 `make ci` 包含 Go 的协议兼容/开关/资源测试，以及 Node 内置测试运行器执行的图片组件数据流测试（`make image-app-test`）。没有新增 npm 依赖。
 

@@ -13,6 +13,7 @@ import (
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	protocol "github.com/uvwt/agentdock-protocol"
+	"github.com/uvwt/agentdock-protocol/mcpapps"
 	"github.com/uvwt/nexusdock/internal/agentdock"
 	"github.com/uvwt/nexusdock/internal/privatenotes"
 	"github.com/uvwt/nexusdock/internal/recall"
@@ -175,7 +176,7 @@ func nodeMCPToolWithApps(descriptor agentdock.ToolDescriptor, mcpAppsEnabled boo
 	if len(descriptor.Meta) > 0 {
 		meta := make(mcpsdk.Meta, len(descriptor.Meta))
 		for key, value := range descriptor.Meta {
-			if key == "ui" && !mcpAppsEnabled {
+			if (key == "ui" || key == "openai/outputTemplate") && !mcpAppsEnabled {
 				continue
 			}
 			meta[key] = value
@@ -189,8 +190,8 @@ func nodeMCPToolWithApps(descriptor agentdock.ToolDescriptor, mcpAppsEnabled boo
 			tool.Meta = mcpsdk.Meta{}
 		}
 		// 仅提供宿主侧图片附件入口，不改节点协议或其他客户端的 image content。
-		tool.Meta["ui"] = map[string]any{"resourceUri": imageAppURI}
-		tool.Meta["openai/outputTemplate"] = imageAppURI
+		tool.Meta["ui"] = map[string]any{"resourceUri": protocol.ImageUIResourceURI}
+		tool.Meta["openai/outputTemplate"] = protocol.ImageUIResourceURI
 	}
 	return tool
 }
@@ -340,14 +341,22 @@ func gatewayToolResult(name string, result map[string]any, err error) (*mcpsdk.C
 func (s *Server) gatewayToolResult(name string, result map[string]any, err error) (*mcpsdk.CallToolResult, error) {
 	response, responseErr := gatewayToolResult(name, result, err)
 	if responseErr == nil && response != nil && !response.IsError && name == "view_image" && s.mcpAppsEnabled() {
+		hasImageHint := false
+		for _, content := range response.Content {
+			if text, ok := content.(*mcpsdk.TextContent); ok && text.Text == mcpapps.ImageResultText {
+				hasImageHint = true
+			}
+		}
 		for _, content := range response.Content {
 			if _, ok := content.(*mcpsdk.ImageContent); ok {
 				if response.Meta == nil {
 					response.Meta = mcpsdk.Meta{}
 				}
-				response.Meta["ui"] = map[string]any{"resourceUri": imageAppURI}
-				response.Meta["openai/outputTemplate"] = imageAppURI
-				response.Content = append(response.Content, &mcpsdk.TextContent{Text: "图片已返回。若客户端未将图片直接提供给模型，可在图片组件中将它附加到下一轮对话。"})
+				response.Meta["ui"] = map[string]any{"resourceUri": protocol.ImageUIResourceURI}
+				response.Meta["openai/outputTemplate"] = protocol.ImageUIResourceURI
+				if !hasImageHint {
+					response.Content = append(response.Content, &mcpsdk.TextContent{Text: mcpapps.ImageResultText})
+				}
 				break
 			}
 		}
@@ -356,6 +365,7 @@ func (s *Server) gatewayToolResult(name string, result map[string]any, err error
 		return response, responseErr
 	}
 	delete(response.Meta, "ui")
+	delete(response.Meta, "openai/outputTemplate")
 	if len(response.Meta) == 0 {
 		response.Meta = nil
 	}

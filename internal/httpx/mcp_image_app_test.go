@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
+	protocol "github.com/uvwt/agentdock-protocol"
+	"github.com/uvwt/agentdock-protocol/mcpapps"
 	"github.com/uvwt/nexusdock/internal/agentdock"
 )
 
@@ -52,7 +54,7 @@ func TestImageAppResourceAvailableOnlyWhenEnabled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	uri := "ui://nexusdock/view-image/v1.html"
+	uri := protocol.ImageUIResourceURI
 	if _, ok := resources[uri]; !ok {
 		t.Fatal("missing image resource")
 	}
@@ -63,9 +65,30 @@ func TestImageAppResourceAvailableOnlyWhenEnabled(t *testing.T) {
 	if len(read.Contents) != 1 || !strings.Contains(read.Contents[0].Text, "imageIds") {
 		t.Fatal("missing image bridge")
 	}
+	if read.Contents[0].Text != mcpapps.HTML("view_image", "Image") {
+		t.Fatal("renderer differs from shared component")
+	}
 	server.mcpAppsEnabledState = false
 	if _, err := server.readPublishedMCPAppResource(t.Context(), uri); err == nil {
 		t.Fatal("disabled image resource readable")
+	}
+}
+
+func TestImageAppDoesNotDuplicateNewNodePresentation(t *testing.T) {
+	server := &Server{mcpAppsEnabledState: true}
+	upstream := map[string]any{"isError": false, "content": []map[string]any{{"type": "image", "mimeType": "image/png", "data": "AQID"}, {"type": "text", "text": mcpapps.ImageResultText}}, "_meta": map[string]any{"ui": map[string]any{"resourceUri": protocol.ImageUIResourceURI}, "openai/outputTemplate": protocol.ImageUIResourceURI}}
+	result, err := server.gatewayToolResult("view_image", upstream, nil)
+	if err != nil || len(result.Content) != 2 {
+		t.Fatalf("duplicated node presentation: %v", err)
+	}
+	server.mcpAppsEnabledState = false
+	result, err = server.gatewayToolResult("view_image", upstream, nil)
+	if err != nil || result.Meta["ui"] != nil || result.Meta["openai/outputTemplate"] != nil {
+		t.Fatal("disabled Apps leaked node presentation")
+	}
+	tool := nodeMCPToolWithApps(agentdock.ToolDescriptor{Name: "view_image", InputSchema: map[string]any{"type": "object"}, Meta: upstream["_meta"].(map[string]any)}, false)
+	if tool.Meta["openai/outputTemplate"] != nil {
+		t.Fatal("disabled tool leaked image template")
 	}
 }
 
